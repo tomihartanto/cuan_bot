@@ -8,11 +8,11 @@ on:
       mode:
         description: "Run mode"
         required: false
-        default: "dry-run"
+        default: "live"
         type: choice
         options:
-          - dry-run
           - live
+          - dry-run
           - scan-only
 
 jobs:
@@ -47,18 +47,18 @@ jobs:
         env:
           TOKOCRYPTO_API_KEY: ${{ secrets.TOKOCRYPTO_API_KEY }}
           TOKOCRYPTO_SECRET_KEY: ${{ secrets.TOKOCRYPTO_SECRET_KEY }}
-          DRY_RUN: ${{ github.event.inputs.mode == 'live' && 'false' || 'true' }}
+          DRY_RUN: ${{ github.event.inputs.mode == 'dry-run' && 'true' || 'false' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           NOTIFY_TRADES: "true"
-          NOTIFY_SCAN: "true"
+          NOTIFY_SCAN: "false"
         run: |
           if [ "${{ github.event.inputs.mode }}" = "scan-only" ]; then
             python main.py --scan-only
-          elif [ "${{ github.event.inputs.mode }}" = "live" ]; then
-            python main.py --live
-          else
+          elif [ "${{ github.event.inputs.mode }}" = "dry-run" ]; then
             python main.py --dry-run
+          else
+            python main.py --live
           fi
 
       - name: Save state
