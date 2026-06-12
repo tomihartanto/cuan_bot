@@ -1,9 +1,8 @@
 ﻿"""
-CuanBot - Smart Scoring Engine v2
-Multi-timeframe analysis for higher accuracy
+CuanBot - Smart Scoring Engine v2 (Pure Python)
+Multi-timeframe analysis - No pandas/numpy
 """
 
-import pandas as pd
 from bot.indicators import calc_rsi, calc_macd, calc_bollinger, calc_volume_trend, calc_price_change
 from config import Config
 
@@ -13,15 +12,14 @@ def score_coin(candles: list) -> dict:
     if len(candles) < 30:
         return {"score": 50, "signals": {}, "action": "HOLD", "reason": "Data kurang"}
 
-    df = pd.DataFrame(candles)
-    close = df["close"].astype(float)
-    volume = df["volume"].astype(float)
+    closes = [float(c["close"]) for c in candles]
+    volumes = [float(c["volume"]) for c in candles]
 
-    rsi = calc_rsi(close, Config.RSI_PERIOD)
-    macd = calc_macd(close, Config.MACD_FAST, Config.MACD_SLOW, Config.MACD_SIGNAL)
-    bb = calc_bollinger(close, Config.BB_PERIOD, Config.BB_STD)
-    vol = calc_volume_trend(volume, Config.VOLUME_MA_PERIOD)
-    price = calc_price_change(close)
+    rsi = calc_rsi(closes, Config.RSI_PERIOD)
+    macd = calc_macd(closes, Config.MACD_FAST, Config.MACD_SLOW, Config.MACD_SIGNAL)
+    bb = calc_bollinger(closes, Config.BB_PERIOD, Config.BB_STD)
+    vol = calc_volume_trend(volumes, Config.VOLUME_MA_PERIOD)
+    price = calc_price_change(closes)
 
     # RSI Score (0-25)
     if rsi < 20: rsi_score = 25
@@ -89,7 +87,6 @@ def score_coin_multi_tf(candles_by_tf: dict) -> dict:
         result = score_coin(candles)
         scores[tf] = result
 
-    # Weighted average score
     total_weight = 0
     weighted_score = 0
     for tf, weight in Config.TIMEFRAME_WEIGHTS.items():
@@ -102,21 +99,18 @@ def score_coin_multi_tf(candles_by_tf: dict) -> dict:
 
     final_score = int(weighted_score / total_weight)
 
-    # Use the shortest timeframe for price and detailed signals
     primary = scores.get(Config.TIMEFRAME, scores.get("5m", {}))
 
-    # Boost score if multiple timeframes agree
     buy_count = sum(1 for s in scores.values() if s["action"] == "BUY")
     if buy_count >= 2:
-        final_score = min(100, final_score + 10)  # Multi-TF confluence bonus
+        final_score = min(100, final_score + 10)
     if buy_count == 3:
-        final_score = min(100, final_score + 5)   # Full confluence bonus
+        final_score = min(100, final_score + 5)
 
     if final_score >= Config.MIN_SCORE_TO_BUY: action = "BUY"
     elif final_score <= Config.MIN_SCORE_TO_HOLD: action = "SELL"
     else: action = "HOLD"
 
-    # Combine reasons
     all_reasons = set()
     for s in scores.values():
         if s["reason"] != "No strong signals":
