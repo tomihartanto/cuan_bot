@@ -1,0 +1,81 @@
+﻿name: CuanBot - Auto Trade
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: false
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - live
+          - scan-only
+
+jobs:
+  trade:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore state
+        run: |
+          git fetch origin state || true
+          if git show origin/state:state.json > /dev/null 2>&1; then
+            git show origin/state:state.json > state.json
+            echo "State restored"
+          else
+            echo "No previous state, starting fresh"
+          fi
+
+      - name: Run CuanBot
+        env:
+          TOKOCRYPTO_API_KEY: ${{ secrets.TOKOCRYPTO_API_KEY }}
+          TOKOCRYPTO_SECRET_KEY: ${{ secrets.TOKOCRYPTO_SECRET_KEY }}
+          DRY_RUN: ${{ github.event.inputs.mode == 'live' && 'false' || 'true' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_TRADES: "true"
+          NOTIFY_SCAN: "true"
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "scan-only" ]; then
+            python main.py --scan-only
+          elif [ "${{ github.event.inputs.mode }}" = "live" ]; then
+            python main.py --live
+          else
+            python main.py --dry-run
+          fi
+
+      - name: Save state
+        run: |
+          if [ -f state.json ]; then
+            git config user.name "CuanBot"
+            git config user.email "cuanbot@github.com"
+            git checkout -B state
+            git add state.json
+            git diff --cached --quiet || git commit -m "state: $(date -u +%Y-%m-%dT%H:%M)"
+            git push origin state --force
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 7

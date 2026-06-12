@@ -1,0 +1,13 @@
+﻿.env
+__pycache__/
+*.pyc
+*.pyo
+logs/
+*.log
+state.json
+venv/
+.env.local
+debug_*.py
+test_*.py
+check_*.py
+run_*.py
