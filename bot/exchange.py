@@ -1,18 +1,17 @@
 ﻿"""
-CuanBot - Exchange Connection v4
-Handles rate limiting, works from GitHub
+CuanBot - Exchange Connection v5
+Simplified Binance access - no symbol pre-check
 """
 
 import ccxt
 import requests
-import time
+import time as _time
 from config import Config
 import logging
 
 logger = logging.getLogger("cuanbot")
 
 _usdt_idr_rate = None
-_binance_symbols = None
 
 
 def get_usdt_idr_rate() -> float:
@@ -20,9 +19,10 @@ def get_usdt_idr_rate() -> float:
     if _usdt_idr_rate:
         return _usdt_idr_rate
     try:
-        resp = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "USDTIDR"}, timeout=10)
-        if resp.status_code == 200:
-            _usdt_idr_rate = float(resp.json()["price"])
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "USDTIDR"}, timeout=10)
+        if r.status_code == 200:
+            _usdt_idr_rate = float(r.json()["price"])
+            logger.info(f"USDT/IDR rate: {_usdt_idr_rate}")
             return _usdt_idr_rate
     except: pass
     try:
@@ -36,26 +36,10 @@ def get_usdt_idr_rate() -> float:
     return _usdt_idr_rate
 
 
-def _get_binance_symbols() -> set:
-    global _binance_symbols
-    if _binance_symbols is not None:
-        return _binance_symbols
-    try:
-        resp = requests.get("https://api.binance.com/api/v3/exchangeInfo", timeout=15)
-        if resp.status_code == 200:
-            _binance_symbols = {s["symbol"] for s in resp.json().get("symbols", []) if s["status"] == "TRADING"}
-            return _binance_symbols
-    except: pass
-    _binance_symbols = set()
-    return _binance_symbols
-
-
 def create_exchange() -> ccxt.Exchange:
     return ccxt.tokocrypto({
-        "apiKey": Config.API_KEY,
-        "secret": Config.SECRET_KEY,
-        "enableRateLimit": True,
-        "options": {"defaultType": "spot"},
+        "apiKey": Config.API_KEY, "secret": Config.SECRET_KEY,
+        "enableRateLimit": True, "options": {"defaultType": "spot"},
     })
 
 
@@ -71,37 +55,21 @@ def fetch_candles(exchange, symbol: str, timeframe: str = None, limit: int = Non
         lim = limit or Config.CANDLE_LIMIT
         base = symbol.split("/")[0]
         rate = get_usdt_idr_rate()
-        available = _get_binance_symbols()
-
         url = "https://api.binance.com/api/v3/klines"
 
-        # Try quote assets in order of preference
-        for quote in ["USDT", "BTC", "BNB", "ETH", "IDR"]:
-            sym = f"{base}{quote}"
-            if available and sym not in available:
-                continue
-            try:
-                resp = requests.get(url, params={"symbol": sym, "interval": tf, "limit": lim}, timeout=15)
-                if resp.status_code == 429:
-                    logger.warning("Binance rate limit hit, waiting...")
-                    time.sleep(2)
-                    resp = requests.get(url, params={"symbol": sym, "interval": tf, "limit": lim}, timeout=15)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        if quote == "IDR":
-                            multiplier = 1
-                        elif quote == "USDT":
-                            multiplier = rate
-                        else:
-                            try:
-                                qr = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": f"{quote}USDT"}, timeout=5)
-                                multiplier = float(qr.json()["price"]) * rate if qr.status_code == 200 else rate
-                            except:
-                                multiplier = rate
-                        return [{"timestamp": c[0], "open": float(c[1]) * multiplier, "high": float(c[2]) * multiplier,
-                                  "low": float(c[3]) * multiplier, "close": float(c[4]) * multiplier, "volume": float(c[5])} for c in data]
-            except: continue
+        # Simple: just try BTCUSDT, ETHUSDT etc directly
+        binance_sym = f"{base}USDT"
+        resp = requests.get(url, params={"symbol": binance_sym, "interval": tf, "limit": lim}, timeout=15)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list) and len(data) > 0:
+                return [{"timestamp": c[0], "open": float(c[1]) * rate, "high": float(c[2]) * rate,
+                          "low": float(c[3]) * rate, "close": float(c[4]) * rate, "volume": float(c[5])} for c in data]
+            else:
+                logger.warning(f"Binance returned 0 candles for {binance_sym}")
+        else:
+            logger.warning(f"Binance error {binance_sym}: {resp.status_code}")
         return []
     except Exception as e:
         logger.warning(f"Candle error {symbol}: {e}")
