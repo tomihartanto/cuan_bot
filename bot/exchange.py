@@ -1,82 +1,99 @@
 ﻿"""
-CuanBot - Exchange Connection & Market Data v3
-Fully works from GitHub - Binance for data, Tokocrypto for trade
+CuanBot - Exchange Connection v4
+Handles rate limiting, works from GitHub
 """
 
 import ccxt
 import requests
+import time
 from config import Config
 import logging
 
 logger = logging.getLogger("cuanbot")
 
 _usdt_idr_rate = None
+_binance_symbols = None
 
 
 def get_usdt_idr_rate() -> float:
     global _usdt_idr_rate
     if _usdt_idr_rate:
         return _usdt_idr_rate
-    # Try Binance IDR pair first
     try:
         resp = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "USDTIDR"}, timeout=10)
         if resp.status_code == 200:
             _usdt_idr_rate = float(resp.json()["price"])
             return _usdt_idr_rate
-    except:
-        pass
-    # Fallback: estimate from BNB/IDR and BNB/USDT
+    except: pass
     try:
-        bnb_idr = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BNBIDR"}, timeout=10)
-        bnb_usdt = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BNBUSDT"}, timeout=10)
-        if bnb_idr.status_code == 200 and bnb_usdt.status_code == 200:
-            _usdt_idr_rate = float(bnb_idr.json()["price"]) / float(bnb_usdt.json()["price"])
+        r1 = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BNBIDR"}, timeout=10)
+        r2 = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": "BNBUSDT"}, timeout=10)
+        if r1.status_code == 200 and r2.status_code == 200:
+            _usdt_idr_rate = float(r1.json()["price"]) / float(r2.json()["price"])
             return _usdt_idr_rate
-    except:
-        pass
+    except: pass
     _usdt_idr_rate = 17000.0
     return _usdt_idr_rate
 
 
+def _get_binance_symbols() -> set:
+    global _binance_symbols
+    if _binance_symbols is not None:
+        return _binance_symbols
+    try:
+        resp = requests.get("https://api.binance.com/api/v3/exchangeInfo", timeout=15)
+        if resp.status_code == 200:
+            _binance_symbols = {s["symbol"] for s in resp.json().get("symbols", []) if s["status"] == "TRADING"}
+            return _binance_symbols
+    except: pass
+    _binance_symbols = set()
+    return _binance_symbols
+
+
 def create_exchange() -> ccxt.Exchange:
-    exchange = ccxt.tokocrypto({
+    return ccxt.tokocrypto({
         "apiKey": Config.API_KEY,
         "secret": Config.SECRET_KEY,
         "enableRateLimit": True,
         "options": {"defaultType": "spot"},
     })
-    return exchange
 
 
-def get_idr_pairs(exchange: ccxt.Exchange = None) -> list:
-    """Get tradeable pairs. Works even if Tokocrypto is blocked."""
-    pairs = []
-    for symbol in Config.SCAN_COINS:
-        pairs.append(f"{symbol}/{Config.BASE_CURRENCY}")
+def get_idr_pairs(exchange=None) -> list:
+    pairs = [f"{s}/{Config.BASE_CURRENCY}" for s in Config.SCAN_COINS]
     logger.info(f"Using {len(pairs)} configured pairs")
     return pairs
 
 
-def fetch_candles(exchange: ccxt.Exchange, symbol: str, timeframe: str = None, limit: int = None) -> list:
+def fetch_candles(exchange, symbol: str, timeframe: str = None, limit: int = None) -> list:
     try:
         tf = timeframe or Config.TIMEFRAME
         lim = limit or Config.CANDLE_LIMIT
         base = symbol.split("/")[0]
         rate = get_usdt_idr_rate()
+        available = _get_binance_symbols()
 
-        # Try Binance USDT pair (most reliable)
         url = "https://api.binance.com/api/v3/klines"
-        for quote in ["USDT", "BTC", "BNB", "ETH"]:
-            binance_symbol = f"{base}{quote}"
+
+        # Try quote assets in order of preference
+        for quote in ["USDT", "BTC", "BNB", "ETH", "IDR"]:
+            sym = f"{base}{quote}"
+            if available and sym not in available:
+                continue
             try:
-                resp = requests.get(url, params={"symbol": binance_symbol, "interval": tf, "limit": lim}, timeout=15)
+                resp = requests.get(url, params={"symbol": sym, "interval": tf, "limit": lim}, timeout=15)
+                if resp.status_code == 429:
+                    logger.warning("Binance rate limit hit, waiting...")
+                    time.sleep(2)
+                    resp = requests.get(url, params={"symbol": sym, "interval": tf, "limit": lim}, timeout=15)
                 if resp.status_code == 200:
                     data = resp.json()
                     if isinstance(data, list) and len(data) > 0:
-                        if quote == "USDT":
+                        if quote == "IDR":
+                            multiplier = 1
+                        elif quote == "USDT":
                             multiplier = rate
                         else:
-                            # Get quote/USDT rate
                             try:
                                 qr = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol": f"{quote}USDT"}, timeout=5)
                                 multiplier = float(qr.json()["price"]) * rate if qr.status_code == 200 else rate
@@ -84,15 +101,14 @@ def fetch_candles(exchange: ccxt.Exchange, symbol: str, timeframe: str = None, l
                                 multiplier = rate
                         return [{"timestamp": c[0], "open": float(c[1]) * multiplier, "high": float(c[2]) * multiplier,
                                   "low": float(c[3]) * multiplier, "close": float(c[4]) * multiplier, "volume": float(c[5])} for c in data]
-            except:
-                continue
+            except: continue
         return []
     except Exception as e:
-        logger.warning(f"Error fetching candles for {symbol}: {e}")
+        logger.warning(f"Candle error {symbol}: {e}")
         return []
 
 
-def get_balance(exchange: ccxt.Exchange, currency: str = None) -> dict:
+def get_balance(exchange, currency=None) -> dict:
     try:
         cur = currency or Config.BASE_CURRENCY
         balance = exchange.fetch_balance()
@@ -110,7 +126,7 @@ def get_balance(exchange: ccxt.Exchange, currency: str = None) -> dict:
         return {"base": {"currency": currency or Config.BASE_CURRENCY, "free": 0, "used": 0, "total": 0}, "holdings": {}}
 
 
-def place_order(exchange: ccxt.Exchange, symbol: str, side: str, amount: float, price: float = None) -> dict:
+def place_order(exchange, symbol, side, amount, price=None) -> dict:
     try:
         if Config.DRY_RUN:
             logger.info(f"[DRY RUN] {side.upper()} {amount:.8f} {symbol} @ ~Rp {price:,.0f}")
@@ -119,7 +135,7 @@ def place_order(exchange: ccxt.Exchange, symbol: str, side: str, amount: float, 
             order = exchange.create_market_buy_order(symbol, amount)
         else:
             order = exchange.create_market_sell_order(symbol, amount)
-        logger.info(f"Order placed: {side.upper()} {amount:.8f} {symbol} | ID: {order.get('id')}")
+        logger.info(f"Order: {side.upper()} {amount:.8f} {symbol} | ID: {order.get('id')}")
         return {"dry_run": False, "id": order.get("id"), "symbol": symbol, "side": side, "amount": amount,
                 "price": order.get("price", price), "status": order.get("status")}
     except Exception as e:
