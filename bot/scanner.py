@@ -1,6 +1,7 @@
-﻿"""
-CuanBot - Smart Scoring Engine v2 (Pure Python)
-Multi-timeframe analysis - No pandas/numpy
+"""
+CuanBot - Smart Scoring Engine v2
+Multi-timeframe analysis for higher accuracy
+(Pure Python - No Pandas)
 """
 
 from bot.indicators import calc_rsi, calc_macd, calc_bollinger, calc_volume_trend, calc_price_change
@@ -87,6 +88,7 @@ def score_coin_multi_tf(candles_by_tf: dict) -> dict:
         result = score_coin(candles)
         scores[tf] = result
 
+    # Weighted average score
     total_weight = 0
     weighted_score = 0
     for tf, weight in Config.TIMEFRAME_WEIGHTS.items():
@@ -99,8 +101,10 @@ def score_coin_multi_tf(candles_by_tf: dict) -> dict:
 
     final_score = int(weighted_score / total_weight)
 
+    # Use the shortest timeframe for price and detailed signals
     primary = scores.get(Config.TIMEFRAME, scores.get("5m", {}))
 
+    # Boost score if multiple timeframes agree
     buy_count = sum(1 for s in scores.values() if s["action"] == "BUY")
     if buy_count >= 2:
         final_score = min(100, final_score + 10)

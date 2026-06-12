@@ -1,22 +1,23 @@
-﻿"""
-CuanBot - Technical Indicators Calculator (Pure Python)
-RSI, MACD, Bollinger Bands, Volume Analysis - No pandas/numpy
 """
+CuanBot - Technical Indicators Calculator (Pure Python - No Pandas/NumPy)
+RSI, MACD, Bollinger Bands, Volume Analysis
+"""
+
+from math import sqrt
 
 
 def _sma(data: list, period: int) -> list:
-    """Simple Moving Average."""
     result = []
     for i in range(len(data)):
         if i < period - 1:
             result.append(None)
         else:
-            result.append(sum(data[i - period + 1:i + 1]) / period)
+            window = data[i - period + 1:i + 1]
+            result.append(sum(window) / period)
     return result
 
 
 def _ema(data: list, period: int) -> list:
-    """Exponential Moving Average."""
     k = 2 / (period + 1)
     result = [data[0]]
     for i in range(1, len(data)):
@@ -24,8 +25,7 @@ def _ema(data: list, period: int) -> list:
     return result
 
 
-def _std(data: list, period: int) -> list:
-    """Rolling Standard Deviation."""
+def _rolling_std(data: list, period: int) -> list:
     result = []
     for i in range(len(data)):
         if i < period - 1:
@@ -34,14 +34,14 @@ def _std(data: list, period: int) -> list:
             window = data[i - period + 1:i + 1]
             mean = sum(window) / period
             variance = sum((x - mean) ** 2 for x in window) / period
-            result.append(variance ** 0.5)
+            result.append(sqrt(variance))
     return result
 
 
-def calc_rsi(prices: list, period: int = 14) -> float:
-    if len(prices) < period + 1:
+def calc_rsi(closes: list, period: int = 14) -> float:
+    if len(closes) < period + 1:
         return 50.0
-    deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
     gains = [d if d > 0 else 0.0 for d in deltas]
     losses = [-d if d < 0 else 0.0 for d in deltas]
     avg_gain = sum(gains[:period]) / period
@@ -52,48 +52,49 @@ def calc_rsi(prices: list, period: int = 14) -> float:
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
-    return 100.0 - (100.0 / (1.0 + rs))
+    return float(100 - (100 / (1 + rs)))
 
 
-def calc_macd(prices: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
-    if len(prices) < slow + signal:
+def calc_macd(closes: list, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+    if len(closes) < slow + signal:
         return {"macd": 0.0, "signal": 0.0, "histogram": 0.0, "prev_histogram": 0.0,
                 "crossover_bullish": False, "crossover_bearish": False}
-    ema_fast = _ema(prices, fast)
-    ema_slow = _ema(prices, slow)
-    macd_line = [ema_fast[i] - ema_slow[i] for i in range(len(prices))]
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
     signal_line = _ema(macd_line, signal)
-    histogram = [macd_line[i] - signal_line[i] for i in range(len(prices))]
+    histogram = [m - s for m, s in zip(macd_line, signal_line)]
+    h = histogram[-1] if len(histogram) > 0 else 0.0
+    ph = histogram[-2] if len(histogram) > 1 else 0.0
     return {
-        "macd": macd_line[-1],
-        "signal": signal_line[-1],
-        "histogram": histogram[-1],
-        "prev_histogram": histogram[-2] if len(histogram) > 1 else 0.0,
-        "crossover_bullish": len(histogram) >= 2 and histogram[-2] <= 0 and histogram[-1] > 0,
-        "crossover_bearish": len(histogram) >= 2 and histogram[-2] >= 0 and histogram[-1] < 0,
+        "macd": float(macd_line[-1]) if macd_line else 0.0,
+        "signal": float(signal_line[-1]) if signal_line else 0.0,
+        "histogram": float(h),
+        "prev_histogram": float(ph),
+        "crossover_bullish": ph <= 0 and h > 0,
+        "crossover_bearish": ph >= 0 and h < 0,
     }
 
 
-def calc_bollinger(prices: list, period: int = 20, std_dev: float = 2.0) -> dict:
-    if len(prices) < period:
-        current = prices[-1]
+def calc_bollinger(closes: list, period: int = 20, std_dev: float = 2.0) -> dict:
+    if len(closes) < period:
+        current = closes[-1]
         return {"upper": current * 1.02, "middle": current, "lower": current * 0.98,
                 "position": 0.5, "price": current, "below_lower": False, "above_upper": False}
-    sma_vals = _sma(prices, period)
-    std_vals = _std(prices, period)
+    sma_vals = _sma(closes, period)
+    std_vals = _rolling_std(closes, period)
+    current_price = closes[-1]
     middle = sma_vals[-1]
-    s = std_vals[-1]
-    upper = middle + s * std_dev
-    lower = middle - s * std_dev
-    current = prices[-1]
+    std = std_vals[-1] if std_vals[-1] is not None else 0
+    upper = middle + (std * std_dev)
+    lower = middle - (std * std_dev)
     band_width = upper - lower
-    position = (current - lower) / band_width if band_width > 0 else 0.5
+    position = (current_price - lower) / band_width if band_width > 0 else 0.5
     position = max(0.0, min(1.0, position))
     return {
-        "upper": upper, "middle": middle, "lower": lower,
-        "position": position, "price": current,
-        "below_lower": current < lower,
-        "above_upper": current > upper,
+        "upper": float(upper), "middle": float(middle), "lower": float(lower),
+        "position": float(position), "price": float(current_price),
+        "below_lower": current_price < lower, "above_upper": current_price > upper,
     }
 
 
@@ -111,18 +112,19 @@ def calc_volume_trend(volumes: list, period: int = 20) -> dict:
         recent_avg = sum(volumes[-5:]) / 5
         older_avg = sum(volumes[-10:-5]) / 5
         trend_up = recent_avg > older_avg
-    return {"current": current_vol, "average": avg_vol, "ratio": ratio, "high_volume": ratio > 1.5, "trend_up": trend_up}
+    return {"current": float(current_vol), "average": float(avg_vol),
+            "ratio": float(ratio), "high_volume": ratio > 1.5, "trend_up": trend_up}
 
 
-def calc_price_change(prices: list) -> dict:
-    current = prices[-1]
+def calc_price_change(closes: list) -> dict:
+    current = closes[-1]
     changes = {}
     for periods, label in [(1, "1c"), (4, "4c"), (12, "12c"), (24, "24c")]:
-        if len(prices) > periods:
-            past = prices[-(periods + 1)]
+        if len(closes) > periods:
+            past = closes[-(periods + 1)]
             changes[label] = ((current - past) / past) * 100
         else:
             changes[label] = 0.0
-    return {"current": current, "changes": changes,
+    return {"current": float(current), "changes": changes,
             "trend_short": "up" if changes.get("4c", 0) > 0 else "down",
             "trend_medium": "up" if changes.get("12c", 0) > 0 else "down"}
