@@ -19,23 +19,26 @@ class Config:
     TRADE_AMOUNT_IDR = float(os.getenv("TRADE_AMOUNT_IDR", "10000"))
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-    # === Strategy ===
-    MIN_SCORE_TO_BUY = int(os.getenv("MIN_SCORE_TO_BUY", "68"))
-    MIN_SCORE_TO_HOLD = int(os.getenv("MIN_SCORE_TO_HOLD", "35"))
+    # === Strategy - AGGRESSIVE MODE ===
+    MIN_SCORE_TO_BUY = int(os.getenv("MIN_SCORE_TO_BUY", "58"))
+    MIN_SCORE_TO_HOLD = int(os.getenv("MIN_SCORE_TO_HOLD", "38"))
 
-    # === Risk Management ===
-    MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "5"))
-    STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", "2.0"))
-    TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "3.0"))
-    COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "30"))
+    # === Risk Management - FAST PROFIT ===
+    MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
+    STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", "1.0"))
+    TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "1.2"))
+    COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "10"))
 
     # === Scanner ===
     SCAN_COINS = [
         "BTC", "ETH", "BNB", "SOL", "XRP",
-        "ADA", "DOGE", "DOT", "MATIC", "AVAX",
+        "ADA", "DOGE", "DOT", "AVAX", "ARB",
         "SHIB", "LINK", "UNI", "ATOM", "LTC",
-        "NEAR", "FTM", "ALGO", "MANA", "SAND",
-        "AXS", "APE", "DYDX", "OP", "ARB",
+        "NEAR", "FTM", "ALGO", "SAND", "AXS",
+        "APE", "DYDX", "OP", "SUI", "TON",
+        "WIF", "WLD", "FLOKI", "ONDO", "HBAR",
+        "DOGS", "POL", "TKO", "USDC", "USDT",
+        "MANTA", "GOAT", "SCR", "SPX", "VIRTUAL",
     ]
 
     # === State ===
@@ -59,5 +62,5 @@ class Config:
     VOLUME_MA_PERIOD = 20
 
     # === Candles ===
-    TIMEFRAME = "15m"
+    TIMEFRAME = "5m"
     CANDLE_LIMIT = 100
