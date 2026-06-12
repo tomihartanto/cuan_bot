@@ -19,17 +19,17 @@ class Config:
     TRADE_AMOUNT_IDR = float(os.getenv("TRADE_AMOUNT_IDR", "10000"))
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-    # === Strategy - AGGRESSIVE MODE ===
-    MIN_SCORE_TO_BUY = int(os.getenv("MIN_SCORE_TO_BUY", "58"))
+    # === Strategy - OPTIMIZED FOR 3%/DAY ===
+    MIN_SCORE_TO_BUY = int(os.getenv("MIN_SCORE_TO_BUY", "60"))
     MIN_SCORE_TO_HOLD = int(os.getenv("MIN_SCORE_TO_HOLD", "38"))
 
-    # === Risk Management - FAST PROFIT ===
+    # === Risk Management ===
     MAX_TRADES_PER_DAY = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
-    STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", "1.0"))
-    TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "1.2"))
+    STOP_LOSS_PERCENT = float(os.getenv("STOP_LOSS_PERCENT", "1.2"))
+    TAKE_PROFIT_PERCENT = float(os.getenv("TAKE_PROFIT_PERCENT", "1.5"))
     COOLDOWN_MINUTES = int(os.getenv("COOLDOWN_MINUTES", "10"))
 
-    # === Scanner ===
+    # === Scanner - ALL available IDR pairs ===
     SCAN_COINS = [
         "BTC", "ETH", "BNB", "SOL", "XRP",
         "ADA", "DOGE", "DOT", "AVAX", "ARB",
@@ -39,6 +39,9 @@ class Config:
         "WIF", "WLD", "FLOKI", "ONDO", "HBAR",
         "DOGS", "POL", "TKO", "USDC", "USDT",
         "MANTA", "GOAT", "SCR", "SPX", "VIRTUAL",
+        "ALCH", "ASTER", "CARV", "DRX", "JELLYJELLY",
+        "MOODENG", "NBT", "RENDER", "SKYA", "SOON",
+        "TAO", "U", "VELO", "ZIL",
     ]
 
     # === State ===
