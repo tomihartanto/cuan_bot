@@ -4,10 +4,11 @@ __pycache__/
 *.pyo
 logs/
 *.log
-state.json
 venv/
 .env.local
 debug_*.py
 test_*.py
 check_*.py
+chk*.py
 run_*.py
+logs_archive.zip

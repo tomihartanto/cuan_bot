@@ -62,12 +62,13 @@ jobs:
           fi
 
       - name: Save state
+        if: always()
         run: |
           if [ -f state.json ]; then
             git config user.name "CuanBot"
             git config user.email "cuanbot@github.com"
             git checkout -B state
-            git add state.json
+            git add -f state.json
             git diff --cached --quiet || git commit -m "state: $(date -u +%Y-%m-%dT%H:%M)"
             git push origin state --force
           fi
