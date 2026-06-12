@@ -1,8 +1,8 @@
-﻿name: CuanBot - Auto Trade
+name: CuanBot - Auto Trade
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/5 * * * *"   # Tiap 5 menit, 24/7
   workflow_dispatch:
     inputs:
       mode:
@@ -21,13 +21,14 @@ permissions:
 jobs:
   trade:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4   # Lebih pendek dari 5 menit agar tidak overlap
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0   # Perlu untuk operasi branch state
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -38,34 +39,46 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ── Restore state dari branch 'state' ──────────────────────────────
       - name: Restore state
         run: |
-          git fetch origin state || true
-          if git show origin/state:state.json > /dev/null 2>&1; then
-            git show origin/state:state.json > state.json
-            echo "State restored"
+          if git ls-remote --heads origin state | grep -q state; then
+            git fetch origin state
+            if git show origin/state:state.json > /dev/null 2>&1; then
+              git show origin/state:state.json > state.json
+              echo "✅ State restored dari branch 'state'"
+              cat state.json | python3 -c "import json,sys; s=json.load(sys.stdin); print(f\"  Positions: {len(s.get('positions',[]))} | Trades today: {len(s.get('trades_today',[]))} | PnL: Rp {s.get('daily_pnl',0):,.0f}\")"
+            else
+              echo "ℹ️ Branch state ada tapi state.json tidak ditemukan, mulai fresh"
+            fi
           else
-            echo "No previous state, starting fresh"
+            echo "ℹ️ Belum ada branch state, mulai fresh"
           fi
 
+      # ── Tentukan mode run ─────────────────────────────────────────────
       - name: Run CuanBot
         env:
-          TOKOCRYPTO_API_KEY: ${{ secrets.TOKOCRYPTO_API_KEY }}
+          TOKOCRYPTO_API_KEY:    ${{ secrets.TOKOCRYPTO_API_KEY }}
           TOKOCRYPTO_SECRET_KEY: ${{ secrets.TOKOCRYPTO_SECRET_KEY }}
-          DRY_RUN: ${{ github.event.inputs.mode == 'dry-run' && 'true' || 'false' }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          NOTIFY_TRADES: "true"
-          NOTIFY_SCAN: "false"
+          TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFY_TRADES:  "true"
+          NOTIFY_SCAN:    "false"
+          DRY_RUN:        "false"   # Default: LIVE. Override via workflow_dispatch → dry-run
         run: |
-          if [ "${{ github.event.inputs.mode }}" = "scan-only" ]; then
+          MODE="${{ github.event.inputs.mode }}"
+          if [ "$MODE" = "scan-only" ]; then
+            echo "🔍 Mode: SCAN ONLY"
             python main.py --scan-only
-          elif [ "${{ github.event.inputs.mode }}" = "dry-run" ]; then
-            python main.py --dry-run
+          elif [ "$MODE" = "dry-run" ]; then
+            echo "🧪 Mode: DRY RUN"
+            DRY_RUN=true python main.py --dry-run
           else
+            echo "🚀 Mode: LIVE TRADING"
             python main.py --live
           fi
 
+      # ── Simpan state ke branch 'state' ────────────────────────────────
       - name: Save state
         if: always()
         run: |
@@ -74,10 +87,22 @@ jobs:
             git config user.email "cuanbot@github.com"
             git checkout -B state
             git add -f state.json
-            git diff --cached --quiet || git commit -m "state: $(date -u +%Y-%m-%dT%H:%M)"
-            git push origin state --force
+            # Hanya commit kalau ada perubahan
+            if ! git diff --cached --quiet; then
+              TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M)
+              TRADES=$(python3 -c "import json; s=json.load(open('state.json')); print(len(s.get('trades_today',[])))" 2>/dev/null || echo "?")
+              PNL=$(python3 -c "import json; s=json.load(open('state.json')); print(f\"{s.get('daily_pnl',0):+.0f}\")" 2>/dev/null || echo "?")
+              git commit -m "state: ${TIMESTAMP} | trades=${TRADES} | pnl=Rp${PNL}"
+              git push origin state --force
+              echo "✅ State tersimpan: trades=${TRADES} pnl=Rp${PNL}"
+            else
+              echo "ℹ️ State tidak berubah, skip commit"
+            fi
+          else
+            echo "⚠️ state.json tidak ditemukan!"
           fi
 
+      # ── Upload logs sebagai artifact ──────────────────────────────────
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

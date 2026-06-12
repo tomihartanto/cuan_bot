@@ -1,4 +1,4 @@
-﻿import json, os, logging
+import json, os, logging
 from config import Config
 
 logger = logging.getLogger("cuanbot")
@@ -44,9 +44,31 @@ class RiskManager:
     def can_trade(self):
         self._reset_daily_if_needed()
         from datetime import datetime, timedelta
+
+        # ── Emergency stop: terlalu banyak rugi berturut-turut ──────────
+        consecutive = self.state.get("consecutive_losses", 0)
+        if consecutive >= Config.EMERGENCY_STOP_LOSSES:
+            # Cek apakah sudah melewati pause period
+            last_loss_time = self.state.get("last_loss_time")
+            if last_loss_time:
+                try:
+                    last_dt = datetime.fromisoformat(str(last_loss_time))
+                    pause_end = last_dt + timedelta(hours=Config.EMERGENCY_PAUSE_HOURS)
+                    if datetime.utcnow() < pause_end:
+                        remaining_min = int((pause_end - datetime.utcnow()).seconds / 60)
+                        return False, f"🛑 Emergency stop: {consecutive}x rugi berturut | Resume dalam {remaining_min} menit"
+                    else:
+                        # Pause sudah selesai, reset
+                        logger.info("Emergency stop selesai — bot kembali aktif")
+                        self.state["consecutive_losses"] = 0
+                except: pass
+
+        # ── Max trades per hari ──────────────────────────────────────────
         trades_today = len(self.state.get("trades_today", []))
         if trades_today >= Config.MAX_TRADES_PER_DAY:
             return False, f"Max trades ({trades_today}/{Config.MAX_TRADES_PER_DAY})"
+
+        # ── Cooldown antar trade ─────────────────────────────────────────
         last_time = self.state.get("last_trade_time")
         if last_time:
             try:
@@ -98,8 +120,12 @@ class RiskManager:
                 else:
                     self.state["total_losses"] += 1
                     self.state["consecutive_losses"] = self.state.get("consecutive_losses", 0) + 1
+                    self.state["last_loss_time"] = datetime.utcnow().isoformat()  # ← catat waktu rugi
                     if Config.AUTO_COMPOUND:
                         self.state["compound_profit"] = max(0, self.state.get("compound_profit", 0) - abs(pnl_idr) * 0.5)
+                    # Emergency stop warning
+                    if self.state["consecutive_losses"] >= Config.EMERGENCY_STOP_LOSSES:
+                        logger.warning(f"🛑 Emergency stop aktif! {self.state['consecutive_losses']}x rugi berturut-turut. Pause {Config.EMERGENCY_PAUSE_HOURS} jam.")
                 highest = pos.get("highest_price", entry)
                 self.state["positions"].pop(i)
                 self.save_state()

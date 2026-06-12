@@ -128,3 +128,28 @@ def calc_price_change(closes: list) -> dict:
     return {"current": float(current), "changes": changes,
             "trend_short": "up" if changes.get("4c", 0) > 0 else "down",
             "trend_medium": "up" if changes.get("12c", 0) > 0 else "down"}
+
+
+def calc_ema_cross(closes: list, fast: int = 9, slow: int = 21) -> dict:
+    """Hitung EMA crossover untuk sinyal momentum cepat (cocok scalping 5m)."""
+    if len(closes) < slow + 2:
+        return {"fast": 0.0, "slow": 0.0, "bullish_cross": False, "bearish_cross": False,
+                "above": False, "gap_pct": 0.0}
+    ema_fast = _ema(closes, fast)
+    ema_slow = _ema(closes, slow)
+    # Current state
+    curr_fast, curr_slow = ema_fast[-1], ema_slow[-1]
+    prev_fast, prev_slow = ema_fast[-2], ema_slow[-2]
+    above = curr_fast > curr_slow
+    bullish_cross = (prev_fast <= prev_slow) and (curr_fast > curr_slow)  # cross ke atas
+    bearish_cross = (prev_fast >= prev_slow) and (curr_fast < curr_slow)  # cross ke bawah
+    gap_pct = ((curr_fast - curr_slow) / curr_slow * 100) if curr_slow != 0 else 0.0
+    return {
+        "fast": round(curr_fast, 4),
+        "slow": round(curr_slow, 4),
+        "bullish_cross": bullish_cross,
+        "bearish_cross": bearish_cross,
+        "above": above,           # True = fast di atas slow = uptrend
+        "gap_pct": round(gap_pct, 3),
+    }
+

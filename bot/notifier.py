@@ -1,5 +1,6 @@
-﻿"""
-CuanBot - Telegram Notifications v2
+"""
+CuanBot - Telegram Notifications v3
+Notifikasi yang lebih informatif dengan ringkasan P&L lengkap.
 """
 
 import requests
@@ -14,7 +15,11 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
         return False
     try:
         url = f"https://api.telegram.org/bot{Config.TELEGRAM_BOT_TOKEN}/sendMessage"
-        resp = requests.post(url, json={"chat_id": Config.TELEGRAM_CHAT_ID, "text": message, "parse_mode": parse_mode}, timeout=10)
+        resp = requests.post(
+            url,
+            json={"chat_id": Config.TELEGRAM_CHAT_ID, "text": message, "parse_mode": parse_mode},
+            timeout=10,
+        )
         return resp.status_code == 200
     except Exception as e:
         logger.warning(f"Telegram failed: {e}")
@@ -23,64 +28,110 @@ def send_telegram(message: str, parse_mode: str = "HTML") -> bool:
 
 def notify_trade(side, symbol, amount, price, score, reason, dry_run=False, pnl=None, compound=None):
     emoji = "🟢" if side == "buy" else "🔴"
-    mode = "SIMULASI" if dry_run else "LIVE"
-    msg = f"{emoji} <b>{side.upper()}</b> {symbol}\n━━━━━━━━━━━━━━━━\nHarga: Rp {price:,.0f}\nJumlah: {amount:.8f}\nNilai: Rp {amount * price:,.0f}\nSkor: {score}/100\nAlasan: {reason}\nMode: {mode}"
+    mode  = "🧪 SIMULASI" if dry_run else "🔴 LIVE"
+    value = amount * price
+
+    msg = (
+        f"{emoji} <b>{side.upper()}</b> {symbol}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"Harga  : Rp {price:,.0f}\n"
+        f"Jumlah : {amount:.6f}\n"
+        f"Nilai  : Rp {value:,.0f}\n"
+        f"Skor   : {score}/100\n"
+        f"Sinyal : {reason}\n"
+        f"Mode   : {mode}"
+    )
     if pnl:
-        msg += f"\n\n📊 PnL: {pnl.get('pnl_pct', 0):+.2f}% (Rp {pnl.get('pnl_idr', 0):+,})"
-    if compound:
-        msg += f"\n💰 Compound pool: Rp {compound:,.0f}"
+        pnl_pct = pnl.get("pnl_pct", 0)
+        pnl_idr = pnl.get("pnl_idr", 0)
+        icon    = "✅" if pnl_pct >= 0 else "❌"
+        msg += f"\n\n{icon} PnL: <b>{pnl_pct:+.2f}%</b> (Rp {pnl_idr:+,.0f})"
+        if pnl.get("trailing_used"):
+            msg += " | 📈 Trailing stop"
+    if compound is not None:
+        msg += f"\n💰 Pool compound: Rp {compound:,.0f}"
     send_telegram(msg)
 
 
 def notify_scan_results(rankings: list, top_n: int = 5):
-    if not Config.NOTIFY_SCAN: return
-    lines = ["🔍 <b>HASIL SCAN</b>", "━━━━━━━━━━━━━━━━"]
+    if not Config.NOTIFY_SCAN:
+        return
+    lines = ["🔍 <b>TOP COIN SCAN</b>", "━━━━━━━━━━━━━━━━"]
     for i, c in enumerate(rankings[:top_n]):
         e = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(c["action"], "⚪")
-        lines.append(f"{i+1}. {e} <b>{c['symbol']}</b> — {c['score']}/100 | Rp {c['price']:,.0f} | {c['reason']}")
+        lines.append(
+            f"{i+1}. {e} <b>{c['symbol']}</b> — {c['score']}/100\n"
+            f"   Rp {c['price']:,.0f} | {c['reason']}"
+        )
     send_telegram("\n".join(lines))
 
 
 def notify_daily_summary(status: dict):
-    pos_text = ""
+    pos_lines = ""
     for p in status.get("positions", []):
-        pos_text += f"\n   {p['symbol']} @ Rp {p['entry_price']:,.0f}"
-    e = "📈" if status["daily_pnl"] >= 0 else "📉"
-    trail = "ON" if Config.TRAILING_STOP_ENABLED else "OFF"
+        pos_lines += f"\n   • {p['symbol']} entry Rp {p['entry_price']:,.0f}"
+
+    pnl_today   = status["daily_pnl"]
+    pnl_total   = status["total_pnl"]
+    e_today     = "📈" if pnl_today >= 0 else "📉"
+    e_total     = "📈" if pnl_total >= 0 else "📉"
+    win_rate    = status["win_rate"]
+    cons_loss   = status.get("consecutive_losses", 0)
+    stop_warn   = f"\n🛑 <b>WARNING:</b> {cons_loss}x rugi berturut-turut!" if cons_loss >= 2 else ""
+
     compound_str = f"Rp {status.get('compound_profit', 0):,.0f}" if Config.AUTO_COMPOUND else "OFF"
-    trade_amt = f"Rp {status.get('current_trade_amount', 0):,.0f}"
+    trade_amt    = f"Rp {status.get('current_trade_amount', 0):,.0f}"
+
     msg = (
-        f"📊 <b>DAILY SUMMARY</b>\n━━━━━━━━━━━━━━━━\n"
-        f"Trade: {status['trades_today']}/{status['max_trades']}\n"
-        f"Open: {status['open_positions']}{pos_text}\n"
-        f"{e} PnL today: Rp {status['daily_pnl']:,.0f}\n"
-        f"💰 Total PnL: Rp {status['total_pnl']:,.0f}\n"
-        f"🎯 Win rate: {status['win_rate']}%\n"
-        f"🔢 Total trades: {status['total_trades']}\n"
+        f"📊 <b>RINGKASAN SESI</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"📈 Trailing Stop: {trail}\n"
-        f"🔄 Auto Compound: {compound_str}\n"
-        f"💵 Trade amount: {trade_amt}"
+        f"🔢 Trade: {status['trades_today']}/{status['max_trades']}\n"
+        f"📂 Posisi terbuka: {status['open_positions']}{pos_lines}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"{e_today} PnL hari ini : <b>Rp {pnl_today:,.0f}</b>\n"
+        f"{e_total} PnL total    : <b>Rp {pnl_total:,.0f}</b>\n"
+        f"🎯 Win rate   : {win_rate}% ({status.get('total_wins',0)}W/{status.get('total_losses',0)}L)\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🔄 Compound pool : {compound_str}\n"
+        f"💵 Modal per trade: {trade_amt}\n"
+        f"📈 Trailing Stop : {'ON' if Config.TRAILING_STOP_ENABLED else 'OFF'}"
+        f"{stop_warn}"
     )
     send_telegram(msg)
 
 
 def notify_error(error_msg: str):
-    send_telegram(f"❌ <b>ERROR</b>\n\n{error_msg}")
+    send_telegram(f"❌ <b>ERROR CuanBot</b>\n━━━━━━━━━━━━━━━━\n{error_msg}")
+
+
+def notify_emergency_stop(consecutive: int, pause_hours: float):
+    msg = (
+        f"🛑 <b>EMERGENCY STOP AKTIF</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"Rugi berturut-turut: {consecutive}x\n"
+        f"Bot pause selama: {pause_hours} jam\n"
+        f"Semua posisi masih dipantau untuk stop loss.\n"
+        f"Trading akan otomatis resume setelah pause selesai."
+    )
+    send_telegram(msg)
 
 
 def notify_startup():
-    mode = "DRY RUN" if Config.DRY_RUN else "🔴 LIVE"
-    trail = "ON" if Config.TRAILING_STOP_ENABLED else "OFF"
+    mode     = "🧪 DRY RUN" if Config.DRY_RUN else "🔴 LIVE TRADING"
+    trail    = f"ON ({Config.TRAILING_PERCENT}%, aktif di +{Config.TRAILING_ACTIVATION}%)"  if Config.TRAILING_STOP_ENABLED else "OFF"
     compound = "ON" if Config.AUTO_COMPOUND else "OFF"
+
     send_telegram(
-        f"🤖 <b>CuanBot v2 Started</b>\n━━━━━━━━━━━━━━━━\n"
-        f"Mode: {mode}\n"
-        f"Modal: Rp {Config.INITIAL_TRADE_AMOUNT:,.0f}\n"
-        f"Coins: {len(Config.SCAN_COINS)} pairs\n"
-        f"Timeframes: {', '.join(Config.TIMEFRAMES)}\n"
-        f"Min buy: {Config.MIN_SCORE_TO_BUY}/100\n"
-        f"TP: {Config.TAKE_PROFIT_PERCENT}% | SL: {Config.STOP_LOSS_PERCENT}%\n"
-        f"📈 Trailing Stop: {trail} ({Config.TRAILING_PERCENT}%)\n"
-        f"🔄 Auto Compound: {compound}"
+        f"🤖 <b>CuanBot v3 — Siap Trading!</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"Mode     : {mode}\n"
+        f"Modal    : Rp {Config.INITIAL_TRADE_AMOUNT:,.0f}\n"
+        f"Target   : TP {Config.TAKE_PROFIT_PERCENT}% | SL {Config.STOP_LOSS_PERCENT}%\n"
+        f"Cooldown : {Config.COOLDOWN_MINUTES} menit\n"
+        f"Max/hari : {Config.MAX_TRADES_PER_DAY} trades\n"
+        f"Scan     : {len(Config.SCAN_COINS)} coin | {', '.join(Config.TIMEFRAMES)}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📈 Trailing: {trail}\n"
+        f"🔄 Compound: {compound}\n"
+        f"🛡️ Emergency stop: setelah {Config.EMERGENCY_STOP_LOSSES}x rugi berturut"
     )

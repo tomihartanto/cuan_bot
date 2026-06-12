@@ -1,5 +1,6 @@
-﻿"""
-CuanBot v2 - Smart Crypto Investment Manager
+"""
+CuanBot v3 - Smart Crypto Investment Manager
+Scalping otomatis: EMA crossover + RSI + MACD + Bollinger
 """
 
 import sys, os
@@ -169,12 +170,21 @@ def run(dry_run_override=None, scan_only=False):
         risk.save_state()
         return
 
-    # Execute
+    # Execute buy
     if buy_signals:
         can, reason = risk.can_trade()
         if can:
-            logger.info(f"Buying: {buy_signals[0]['symbol']} (Score: {buy_signals[0]['score']})")
-            execute_buy(exchange, risk, buy_signals[0])
+            best = buy_signals[0]
+            logger.info(f"Membeli: {best['symbol']} (Skor: {best['score']})")
+            execute_buy(exchange, risk, best)
+        else:
+            logger.info(f"Tidak bisa trade: {reason}")
+            # Kirim notif emergency stop kalau itu penyebabnya
+            if "Emergency stop" in reason:
+                notifier.notify_emergency_stop(
+                    risk.state.get("consecutive_losses", 0),
+                    Config.EMERGENCY_PAUSE_HOURS,
+                )
 
     # Check sell for holdings
     balance = get_balance(exchange)
