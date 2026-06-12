@@ -1,6 +1,6 @@
 ﻿"""
-CuanBot - Smart Scoring Engine
-Combines all technical indicators into a single score (0-100)
+CuanBot - Smart Scoring Engine v2
+Multi-timeframe analysis for higher accuracy
 """
 
 import pandas as pd
@@ -9,8 +9,9 @@ from config import Config
 
 
 def score_coin(candles: list) -> dict:
+    """Score a coin from single timeframe candles."""
     if len(candles) < 30:
-        return {"score": 50, "signals": {}, "action": "HOLD", "reason": "Data tidak cukup"}
+        return {"score": 50, "signals": {}, "action": "HOLD", "reason": "Data kurang"}
 
     df = pd.DataFrame(candles)
     close = df["close"].astype(float)
@@ -24,12 +25,12 @@ def score_coin(candles: list) -> dict:
 
     # RSI Score (0-25)
     if rsi < 20: rsi_score = 25
-    elif rsi < 30: rsi_score = 22
+    elif rsi < 30: rsi_score = 23
     elif rsi < 40: rsi_score = 18
-    elif rsi < 50: rsi_score = 14
-    elif rsi < 60: rsi_score = 10
-    elif rsi < 70: rsi_score = 6
-    elif rsi < 80: rsi_score = 3
+    elif rsi < 50: rsi_score = 13
+    elif rsi < 60: rsi_score = 9
+    elif rsi < 70: rsi_score = 5
+    elif rsi < 80: rsi_score = 2
     else: rsi_score = 0
 
     # MACD Score (0-25)
@@ -40,7 +41,7 @@ def score_coin(candles: list) -> dict:
     elif macd["crossover_bearish"]: macd_score = 0
     elif macd["histogram"] < 0: macd_score = 5
 
-    # Bollinger Score (0-25) - lower position = higher score (buy signal)
+    # Bollinger Score (0-25)
     bb_score = max(0, min(25, int(25 - bb["position"] * 25)))
     if bb["below_lower"]: bb_score = 25
     elif bb["above_upper"]: bb_score = 0
@@ -61,23 +62,74 @@ def score_coin(candles: list) -> dict:
     reasons = []
     if rsi < 30: reasons.append(f"RSI oversold ({rsi:.1f})")
     elif rsi > 70: reasons.append(f"RSI overbought ({rsi:.1f})")
-    if macd["crossover_bullish"]: reasons.append("MACD bullish crossover")
-    elif macd["crossover_bearish"]: reasons.append("MACD bearish crossover")
-    if bb["below_lower"]: reasons.append("Price below lower BB")
-    elif bb["above_upper"]: reasons.append("Price above upper BB")
-    if vol["high_volume"]: reasons.append(f"High volume ({vol['ratio']:.1f}x)")
+    if macd["crossover_bullish"]: reasons.append("MACD bullish cross")
+    elif macd["crossover_bearish"]: reasons.append("MACD bearish cross")
+    if bb["below_lower"]: reasons.append("Below lower BB")
+    elif bb["above_upper"]: reasons.append("Above upper BB")
+    if vol["high_volume"]: reasons.append(f"High vol ({vol['ratio']:.1f}x)")
     reason = " | ".join(reasons) if reasons else "No strong signals"
 
     return {
         "score": total_score,
         "signals": {
             "rsi": {"value": round(rsi, 1), "score": rsi_score},
-            "macd": {"hist": round(macd["histogram"], 4), "score": macd_score, "bullish_cross": macd["crossover_bullish"]},
+            "macd": {"hist": round(macd["histogram"], 4), "score": macd_score, "bullish": macd["crossover_bullish"]},
             "bb": {"position": round(bb["position"], 2), "score": bb_score},
             "volume": {"ratio": round(vol["ratio"], 2), "score": vol_score},
             "price_change": price["changes"],
         },
+        "action": action, "reason": reason, "price": price["current"],
+    }
+
+
+def score_coin_multi_tf(candles_by_tf: dict) -> dict:
+    """Score coin using multiple timeframes with weighted average."""
+    scores = {}
+    for tf, candles in candles_by_tf.items():
+        result = score_coin(candles)
+        scores[tf] = result
+
+    # Weighted average score
+    total_weight = 0
+    weighted_score = 0
+    for tf, weight in Config.TIMEFRAME_WEIGHTS.items():
+        if tf in scores:
+            weighted_score += scores[tf]["score"] * weight
+            total_weight += weight
+
+    if total_weight == 0:
+        return scores.get(Config.TIMEFRAME, {"score": 50, "action": "HOLD", "reason": "No data"})
+
+    final_score = int(weighted_score / total_weight)
+
+    # Use the shortest timeframe for price and detailed signals
+    primary = scores.get(Config.TIMEFRAME, scores.get("5m", {}))
+
+    # Boost score if multiple timeframes agree
+    buy_count = sum(1 for s in scores.values() if s["action"] == "BUY")
+    if buy_count >= 2:
+        final_score = min(100, final_score + 10)  # Multi-TF confluence bonus
+    if buy_count == 3:
+        final_score = min(100, final_score + 5)   # Full confluence bonus
+
+    if final_score >= Config.MIN_SCORE_TO_BUY: action = "BUY"
+    elif final_score <= Config.MIN_SCORE_TO_HOLD: action = "SELL"
+    else: action = "HOLD"
+
+    # Combine reasons
+    all_reasons = set()
+    for s in scores.values():
+        if s["reason"] != "No strong signals":
+            all_reasons.add(s["reason"])
+    reason = " | ".join(all_reasons) if all_reasons else "No strong signals"
+    if buy_count >= 2:
+        reason += f" | Multi-TF confirm ({buy_count}/3)"
+
+    return {
+        "score": final_score,
+        "signals": {tf: s["signals"] for tf, s in scores.items()},
         "action": action,
         "reason": reason,
-        "price": price["current"],
+        "price": primary.get("price", 0),
+        "multi_tf": {tf: {"score": s["score"], "action": s["action"]} for tf, s in scores.items()},
     }

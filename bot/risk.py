@@ -1,5 +1,6 @@
 ﻿"""
-CuanBot - Risk Management
+CuanBot - Risk Management v2
+Features: Trailing Stop Loss, Auto Compound, Multi-Position
 """
 
 import json
@@ -18,9 +19,19 @@ class RiskManager:
 
     def _load_state(self) -> dict:
         default = {
-            "trades_today": [], "positions": [], "last_trade_time": None,
-            "daily_pnl": 0.0, "total_pnl": 0.0, "total_trades": 0,
-            "total_wins": 0, "total_losses": 0, "last_reset": None, "last_run": None,
+            "trades_today": [],
+            "positions": [],
+            "last_trade_time": None,
+            "daily_pnl": 0.0,
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "total_wins": 0,
+            "total_losses": 0,
+            "last_reset": None,
+            "last_run": None,
+            "compound_profit": 0.0,
+            "peak_balance": Config.INITIAL_TRADE_AMOUNT,
+            "consecutive_losses": 0,
         }
         try:
             if os.path.exists(self.state_file):
@@ -59,12 +70,18 @@ class RiskManager:
                 if datetime.utcnow() - last_dt < cooldown:
                     remaining = cooldown - (datetime.utcnow() - last_dt)
                     return False, f"Cooldown ({int(remaining.seconds / 60)} min left)"
-            except: pass
+            except:
+                pass
         return True, "OK"
 
     def record_trade(self, symbol: str, side: str, amount: float, price: float, order_id: str = None):
         self._reset_daily_if_needed()
-        trade = {"time": datetime.utcnow().isoformat(), "symbol": symbol, "side": side, "amount": amount, "price": price, "order_id": order_id}
+        trade = {
+            "time": datetime.utcnow().isoformat(),
+            "symbol": symbol, "side": side,
+            "amount": amount, "price": price,
+            "order_id": order_id,
+        }
         self.state["trades_today"].append(trade)
         self.state["last_trade_time"] = datetime.utcnow().isoformat()
         self.state["total_trades"] += 1
@@ -72,13 +89,18 @@ class RiskManager:
 
     def open_position(self, symbol: str, amount: float, entry_price: float):
         position = {
-            "symbol": symbol, "amount": amount, "entry_price": entry_price,
+            "symbol": symbol, "amount": amount,
+            "entry_price": entry_price,
             "entry_time": datetime.utcnow().isoformat(),
             "stop_loss": entry_price * (1 - Config.STOP_LOSS_PERCENT / 100),
             "take_profit": entry_price * (1 + Config.TAKE_PROFIT_PERCENT / 100),
+            "highest_price": entry_price,
+            "trailing_stop": entry_price * (1 - Config.TRAILING_PERCENT / 100),
+            "trailing_activated": False,
         }
         self.state["positions"].append(position)
         self.save_state()
+        logger.info(f"Position opened: {symbol} | Entry: {entry_price} | SL: {position['stop_loss']:.2f} | TP: {position['take_profit']:.2f} | Trailing: {'ON' if Config.TRAILING_STOP_ENABLED else 'OFF'}")
 
     def close_position(self, symbol: str, exit_price: float) -> dict:
         for i, pos in enumerate(self.state["positions"]):
@@ -88,30 +110,93 @@ class RiskManager:
                 pnl_idr = (exit_price - entry) * pos["amount"]
                 self.state["daily_pnl"] += pnl_idr
                 self.state["total_pnl"] += pnl_idr
-                if pnl_percent > 0: self.state["total_wins"] += 1
-                else: self.state["total_losses"] += 1
+
+                if pnl_percent > 0:
+                    self.state["total_wins"] += 1
+                    self.state["consecutive_losses"] = 0
+                    # Auto compound: add profit to compound pool
+                    if Config.AUTO_COMPOUND:
+                        self.state["compound_profit"] += abs(pnl_idr)
+                        logger.info(f"Compound +Rp {abs(pnl_idr):,.0f} (total compound: Rp {self.state['compound_profit']:,.0f})")
+                else:
+                    self.state["total_losses"] += 1
+                    self.state["consecutive_losses"] = self.state.get("consecutive_losses", 0) + 1
+                    # Reduce compound on loss
+                    if Config.AUTO_COMPOUND:
+                        self.state["compound_profit"] = max(0, self.state.get("compound_profit", 0) - abs(pnl_idr) * 0.5)
+
+                highest = pos.get("highest_price", entry)
                 self.state["positions"].pop(i)
                 self.save_state()
-                return {"symbol": symbol, "entry": entry, "exit": exit_price, "pnl_pct": round(pnl_percent, 2), "pnl_idr": round(pnl_idr, 2)}
+
+                return {
+                    "symbol": symbol, "entry": entry, "exit": exit_price,
+                    "pnl_pct": round(pnl_percent, 2), "pnl_idr": round(pnl_idr, 2),
+                    "highest": highest,
+                    "trailing_used": pos.get("trailing_activated", False),
+                    "compound_total": round(self.state.get("compound_profit", 0), 2),
+                }
         return {"error": f"No position for {symbol}"}
 
     def check_positions(self, current_prices: dict) -> list:
+        """Check all positions with trailing stop logic."""
         actions = []
         for pos in self.state["positions"][:]:
             symbol = pos["symbol"]
-            if symbol not in current_prices: continue
+            if symbol not in current_prices:
+                continue
+
             price = current_prices[symbol]
             entry = pos["entry_price"]
             pnl = ((price - entry) / entry) * 100
+
+            # Update highest price
+            if price > pos.get("highest_price", entry):
+                pos["highest_price"] = price
+                pos["trailing_activated"] = True
+
+                # Update trailing stop
+                if Config.TRAILING_STOP_ENABLED:
+                    new_trailing = price * (1 - Config.TRAILING_PERCENT / 100)
+                    if new_trailing > pos.get("trailing_stop", 0):
+                        pos["trailing_stop"] = new_trailing
+                        logger.debug(f"Trailing update: {symbol} | Trail SL: {new_trailing:.2f} | PnL: {pnl:+.2f}%")
+
+            # === SELL CONDITIONS (priority order) ===
+
+            # 1. Hard stop loss (always active)
             if price <= pos["stop_loss"]:
-                actions.append({"action": "SELL", "symbol": symbol, "reason": f"Stop loss ({pnl:+.2f}%)", "price": price, "amount": pos["amount"], "priority": "HIGH"})
+                actions.append({
+                    "action": "SELL", "symbol": symbol,
+                    "reason": f"Stop loss ({pnl:+.2f}%)",
+                    "price": price, "amount": pos["amount"], "priority": "HIGH",
+                })
+
+            # 2. Take profit hit
             elif price >= pos["take_profit"]:
-                actions.append({"action": "SELL", "symbol": symbol, "reason": f"Take profit ({pnl:+.2f}%)", "price": price, "amount": pos["amount"], "priority": "MEDIUM"})
+                actions.append({
+                    "action": "SELL", "symbol": symbol,
+                    "reason": f"Take profit ({pnl:+.2f}%)",
+                    "price": price, "amount": pos["amount"], "priority": "MEDIUM",
+                })
+
+            # 3. Trailing stop hit (price dropped from peak)
+            elif Config.TRAILING_STOP_ENABLED and pos.get("trailing_activated"):
+                trailing_sl = pos.get("trailing_stop", pos["stop_loss"])
+                if price <= trailing_sl and price > pos["stop_loss"]:
+                    actions.append({
+                        "action": "SELL", "symbol": symbol,
+                        "reason": f"Trailing stop ({pnl:+.2f}%, peak was {((pos['highest_price']-entry)/entry)*100:+.2f}%)",
+                        "price": price, "amount": pos["amount"], "priority": "MEDIUM",
+                    })
+
+            self.save_state()
         return actions
 
     def get_status(self) -> dict:
         self._reset_daily_if_needed()
-        total = max(1, self.state.get("total_trades", 0))
+        total = max(1, self.state.get("total_trades", 1))
+        trade_amount = Config.get_trade_amount()
         return {
             "trades_today": len(self.state.get("trades_today", [])),
             "max_trades": Config.MAX_TRADES_PER_DAY,
@@ -121,4 +206,7 @@ class RiskManager:
             "total_trades": self.state.get("total_trades", 0),
             "win_rate": round(self.state.get("total_wins", 0) / total * 100, 1),
             "positions": self.state.get("positions", []),
+            "compound_profit": round(self.state.get("compound_profit", 0), 2),
+            "current_trade_amount": round(trade_amount, 2),
+            "consecutive_losses": self.state.get("consecutive_losses", 0),
         }
