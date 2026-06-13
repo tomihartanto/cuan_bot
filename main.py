@@ -248,9 +248,9 @@ def run(dry_run_override=None, scan_only=False):
     if dry_run_override is not None:
         Config.DRY_RUN = dry_run_override
 
-    mode = "DRY RUN" if Config.DRY_RUN else "🔴 LIVE"
+    mode = "[DRY RUN]" if Config.DRY_RUN else "[LIVE]"
     logger.info(
-        f"CuanBot v4 [{mode}] | "
+        f"CuanBot v4 {mode} | "
         f"TP: {Config.TAKE_PROFIT_PERCENT}% | SL: {Config.STOP_LOSS_PERCENT}% | "
         f"Trailing: {'ON' if Config.TRAILING_STOP_ENABLED else 'OFF'} | "
         f"Compound: {'ON' if Config.AUTO_COMPOUND else 'OFF'}"
