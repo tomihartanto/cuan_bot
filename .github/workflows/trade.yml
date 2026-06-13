@@ -1,5 +1,8 @@
 name: "CuanBot v4 - Auto Trade"
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 # ─────────────────────────────────────────────────────────────────────
 # TRIGGER: Otomatis tiap 5 menit ATAU manual dari GitHub UI
 # ─────────────────────────────────────────────────────────────────────
