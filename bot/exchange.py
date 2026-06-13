@@ -149,7 +149,7 @@ def get_balance(exchange) -> dict:
         return {"idr": {"free": free, "used": used, "total": total}, "holdings": holdings}
     except Exception as e:
         logger.error(f"Balance error: {e}")
-        return {"idr": {"free": 0, "used": 0, "total": 0}, "holdings": {}}
+        raise e
 
 
 def place_order(exchange, symbol: str, side: str, amount_idr: float = None,

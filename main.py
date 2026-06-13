@@ -197,8 +197,14 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str) -> bool:
         logger.warning(f"Modal terlalu kecil: Rp {trade_idr:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}")
         return False
 
-    balance   = get_balance(exchange)
-    available = balance["idr"]["free"]
+    try:
+        balance   = get_balance(exchange)
+        available = balance["idr"]["free"]
+    except Exception as e:
+        logger.error(f"Gagal mengambil saldo: {e}")
+        notifier.notify_error(f"Gagal mengambil saldo Tokocrypto (Kemungkinan API key di-blok/expired):\n{e}")
+        return False
+
     if available < trade_idr:
         logger.warning(f"IDR tidak cukup: Rp {available:,.0f} < Rp {trade_idr:,.0f}")
         notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.0f}")
@@ -332,10 +338,13 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     # Init
     try:
         exchange = create_exchange()
+        if not Config.DRY_RUN:
+            # Test koneksi & validitas API key ke Tokocrypto
+            get_balance(exchange)
         risk     = RiskManager()
     except Exception as e:
         logger.error(f"Init gagal: {e}")
-        notifier.notify_error(f"Init gagal: {e}")
+        notifier.notify_error(f"Init gagal (Cek API Key / IP Whitelist / Tokocrypto down):\n{e}")
         return
 
     # Startup notif (anti-spam: max 1x per jam)
@@ -377,6 +386,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
             risk.reconcile_with_balance(balance["holdings"], current_prices)
         except Exception as e:
             logger.warning(f"Reconcile gagal (lanjut): {e}")
+            notifier.notify_error(f"Reconcile saldo gagal (Koneksi bermasalah/API Key di-blok):\n{e}")
 
     # ── PHASE 2: EXIT — Cek posisi terbuka ─────────────────────────
     if not scan_only:
@@ -388,6 +398,10 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     rankings = scan_all_coins(exchange)
     if not rankings:
         logger.warning("Tidak ada coin yang bisa di-scan")
+        notifier.notify_error(
+            "Gagal melakukan scan coin (0 coin berhasil di-scan).\n"
+            "Kemungkinan koneksi internet terganggu, rate limit Binance API, atau IP GitHub Actions diblok."
+        )
         risk.save_state()
         return
 
