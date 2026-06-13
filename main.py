@@ -2,6 +2,13 @@
 CuanBot v4 - Smart Crypto Investment Manager
 State machine bersih: reconcile → exit positions → entry baru.
 Scalping otomatis: EMA 9/21 + RSI + MACD + Bollinger.
+
+Modes:
+  python main.py --scan-only      # Scan saja, tidak ada transaksi
+  python main.py --dry-run        # Simulasi (tidak ada transaksi nyata)
+  python main.py --live           # Live trading otomatis
+  python main.py --force-buy DOGE # Paksa beli coin tertentu (bypass scoring)
+  python main.py --force-sell     # Jual semua posisi terbuka sekarang
 """
 
 import sys
@@ -34,16 +41,17 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.FileHandler(
-            os.path.join(log_dir, f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log")
+            os.path.join(log_dir, f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.log"),
+            encoding="utf-8",
         ),
-        logging.StreamHandler(),
+        logging.StreamHandler(sys.stdout),
     ],
 )
 logger = logging.getLogger("cuanbot")
 
 
 # ─────────────────────────────────────────────────────────────────────
-# PHASE 1: SCAN semua coin
+# SCAN semua coin
 # ─────────────────────────────────────────────────────────────────────
 
 def scan_all_coins(exchange) -> list:
@@ -54,13 +62,11 @@ def scan_all_coins(exchange) -> list:
 
     for pair in pairs:
         try:
-            # Ambil candle 5m terlebih dahulu
             candles_5m = fetch_candles(exchange, pair, timeframe="5m")
             if not candles_5m or len(candles_5m) < 30:
                 time.sleep(0.2)
                 continue
 
-            # Quick score dulu → lanjut ke multi-TF hanya kalau promising
             quick = score_coin(candles_5m)
 
             if quick["score"] > 35:
@@ -94,37 +100,30 @@ def scan_all_coins(exchange) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# PHASE 2: EXIT — Cek & Eksekusi Jual Posisi Terbuka
+# EXIT — Cek & Eksekusi Jual Posisi Terbuka
 # ─────────────────────────────────────────────────────────────────────
 
 def check_and_sell_positions(exchange, risk: RiskManager) -> bool:
-    """
-    Cek semua posisi terbuka, jual kalau TP/SL/Trailing/Timeout terpenuhi.
-    Return True kalau ada posisi yang dijual.
-    """
+    """Cek semua posisi terbuka, jual kalau TP/SL/Trailing/Timeout terpenuhi."""
     positions = risk.state.get("positions", [])
     if not positions:
         return False
 
-    # Ambil harga terkini untuk semua posisi
     current_prices = {}
     for pos in positions:
         price = fetch_ticker_price(exchange, pos["symbol"])
         if price > 0:
             current_prices[pos["symbol"]] = price
+            pnl = ((price - pos["entry_price"]) / pos["entry_price"] * 100)
             logger.info(
-                f"Posisi: {pos['symbol']} | Entry: Rp {pos['entry_price']:,.2f} | "
-                f"Now: Rp {price:,.2f} | "
-                f"PnL: {((price - pos['entry_price']) / pos['entry_price'] * 100):+.2f}%"
+                f"Posisi: {pos['symbol']} | Entry: Rp {pos['entry_price']:,.0f} | "
+                f"Now: Rp {price:,.0f} | PnL: {pnl:+.2f}%"
             )
 
-    # Dapatkan aksi yang perlu dilakukan
     sell_actions = risk.check_positions(current_prices)
     sold_any = False
-
     for action in sell_actions:
-        success = _execute_sell(exchange, risk, action)
-        if success:
+        if _execute_sell(exchange, risk, action):
             sold_any = True
 
     return sold_any
@@ -137,24 +136,21 @@ def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
     price  = action["price"]
     reason = action["reason"]
 
-    logger.info(f"SELL {symbol}: {amount:.6f} @ Rp {price:,.2f} | {reason}")
-
+    logger.info(f"SELL {symbol}: {amount:.6f} @ Rp {price:,.0f} | {reason}")
     result = place_order(exchange, symbol, "sell", amount_base=amount, price=price)
 
     if result.get("error"):
         logger.error(f"Sell gagal {symbol}: {result['error']}")
-        notifier.notify_error(f"❌ Sell gagal: {symbol}\n{result['error']}")
+        notifier.notify_error(f"Sell gagal: {symbol}\n{result['error']}")
         return False
 
-    # Gunakan filled price dari order kalau ada
     actual_price = result.get("price") or price
     pnl_data     = risk.close_position(symbol, actual_price)
     risk.record_trade(symbol, "sell", amount, actual_price, result.get("id"))
 
     status = risk.get_status()
     notifier.notify_trade(
-        "sell", symbol, amount, actual_price, 0,
-        reason,
+        "sell", symbol, amount, actual_price, 0, reason,
         dry_run=result.get("dry_run", False),
         pnl=pnl_data,
         compound=status.get("compound_profit"),
@@ -163,14 +159,11 @@ def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# PHASE 3: ENTRY — Beli Coin Terbaik
+# ENTRY — Beli Coin Terbaik dari Scan
 # ─────────────────────────────────────────────────────────────────────
 
 def try_buy_best_coin(exchange, risk: RiskManager, rankings: list) -> bool:
-    """
-    Dari hasil scan, coba beli coin dengan sinyal terkuat.
-    Return True kalau berhasil beli.
-    """
+    """Beli coin dengan sinyal terkuat dari hasil scan."""
     can, reason = risk.can_trade()
     if not can:
         logger.info(f"Tidak bisa beli: {reason}")
@@ -181,56 +174,54 @@ def try_buy_best_coin(exchange, risk: RiskManager, rankings: list) -> bool:
             )
         return False
 
-    # Filter: hanya coin dengan sinyal BUY dan tidak falling knife
     buy_candidates = [
         c for c in rankings
         if c.get("action") == "BUY" and not c.get("falling_knife", False)
     ]
 
     if not buy_candidates:
-        logger.info("Tidak ada sinyal BUY yang valid saat ini")
+        logger.info("Tidak ada sinyal BUY yang valid")
         return False
 
-    best = buy_candidates[0]
-    symbol     = best["symbol"]
-    price      = best["price"]
-    score      = best["score"]
-    reason     = best["reason"]
-    trade_idr  = Config.get_trade_amount()
+    return _execute_buy(exchange, risk, buy_candidates[0], buy_candidates[0]["reason"])
+
+
+def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str) -> bool:
+    """Eksekusi satu buy order."""
+    symbol    = coin["symbol"]
+    price     = coin["price"]
+    score     = coin.get("score", 0)
+    trade_idr = Config.get_trade_amount()
 
     if trade_idr < Config.MIN_ORDER_IDR:
         logger.warning(f"Modal terlalu kecil: Rp {trade_idr:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}")
         return False
 
-    logger.info(f"BUY signal: {symbol} | Skor: {score}/100 | Rp {price:,.2f} | {reason}")
-
-    # Cek balance IDR cukup
     balance   = get_balance(exchange)
     available = balance["idr"]["free"]
     if available < trade_idr:
         logger.warning(f"IDR tidak cukup: Rp {available:,.0f} < Rp {trade_idr:,.0f}")
+        notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.0f}")
         return False
 
-    # Eksekusi BUY via quoteOrderQty (beri IDR, dapat crypto)
+    logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.0f} | Alasan: {reason}")
     result = place_order(exchange, symbol, "buy", amount_idr=trade_idr, price=price)
 
     if result.get("error"):
         logger.error(f"Buy gagal {symbol}: {result['error']}")
-        notifier.notify_error(f"❌ Buy gagal: {symbol}\n{result['error']}")
+        notifier.notify_error(f"Buy gagal: {symbol}\n{result['error']}")
         return False
 
-    # Catat posisi dengan jumlah crypto yang benar-benar dapat
-    filled_qty   = result.get("amount", trade_idr / price)
+    filled_qty   = result.get("amount", trade_idr / price if price > 0 else 0)
     filled_price = result.get("price") or price
 
     risk.record_trade(symbol, "buy", filled_qty, filled_price, result.get("id"))
     risk.open_position(symbol, filled_qty, filled_price, value_idr=trade_idr)
 
     logger.info(
-        f"✅ BELI {symbol}: {filled_qty:.6f} crypto | Rp {filled_price:,.2f}/unit | "
-        f"Total: Rp {trade_idr:,.0f}"
+        f"BELI BERHASIL: {symbol} | {filled_qty:.6f} crypto | "
+        f"Rp {filled_price:,.0f}/unit | Total: Rp {trade_idr:,.0f}"
     )
-
     status = risk.get_status()
     notifier.notify_trade(
         "buy", symbol, filled_qty, filled_price, score, reason,
@@ -241,10 +232,92 @@ def try_buy_best_coin(exchange, risk: RiskManager, rankings: list) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# MAIN RUN
+# MANUAL COMMANDS — Force Buy / Force Sell
 # ─────────────────────────────────────────────────────────────────────
 
-def run(dry_run_override=None, scan_only=False):
+def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
+    """
+    MANUAL: Paksa beli coin tertentu dari GitHub Actions.
+    Bypass scoring tapi tetap cek balance dan posisi.
+    """
+    # Normalize: "DOGE" → "DOGE/IDR"
+    sym = symbol_input.strip().upper()
+    if "/" not in sym:
+        sym = f"{sym}/{Config.BASE_CURRENCY}"
+
+    logger.info(f"[FORCE BUY] Request: {sym}")
+    notifier.send_telegram(f"[FORCE BUY] Request masuk untuk <b>{sym}</b>...")
+
+    # Cek posisi dulu
+    can, reason = risk.can_trade()
+    if not can:
+        msg = f"Force buy dibatalkan: {reason}"
+        logger.warning(msg)
+        notifier.notify_error(msg)
+        return
+
+    # Ambil harga terkini
+    price = fetch_ticker_price(exchange, sym)
+    if price <= 0:
+        candles = fetch_candles(exchange, sym, timeframe="5m")
+        if candles:
+            price = candles[-1]["close"]
+
+    if price <= 0:
+        notifier.notify_error(f"Force buy gagal: tidak bisa dapat harga untuk {sym}")
+        return
+
+    # Ambil score untuk info (tidak sebagai filter)
+    score = 0
+    try:
+        candles = fetch_candles(exchange, sym, timeframe="5m")
+        if candles and len(candles) >= 30:
+            result_score = score_coin(candles)
+            score = result_score["score"]
+    except Exception:
+        pass
+
+    coin = {"symbol": sym, "price": price, "score": score, "falling_knife": False}
+    _execute_buy(exchange, risk, coin, f"Manual force buy dari GitHub | Score: {score}/100")
+
+
+def run_force_sell(exchange, risk: RiskManager):
+    """
+    MANUAL: Jual semua posisi terbuka sekarang juga dari GitHub Actions.
+    """
+    positions = risk.state.get("positions", [])
+    if not positions:
+        msg = "Tidak ada posisi terbuka untuk dijual."
+        logger.info(msg)
+        notifier.send_telegram(f"[FORCE SELL] {msg}")
+        return
+
+    logger.info(f"[FORCE SELL] Jual {len(positions)} posisi terbuka...")
+    notifier.send_telegram(f"[FORCE SELL] Menjual <b>{len(positions)} posisi</b> sekarang...")
+
+    for pos in positions[:]:
+        symbol = pos["symbol"]
+        amount = pos["amount"]
+        price  = fetch_ticker_price(exchange, symbol)
+        if price <= 0:
+            price = pos["entry_price"]
+
+        action = {
+            "symbol":   symbol,
+            "amount":   amount,
+            "price":    price,
+            "reason":   "Manual force sell dari GitHub",
+            "priority": "HIGH",
+        }
+        _execute_sell(exchange, risk, action)
+        time.sleep(1)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# MAIN RUN — Auto Trading
+# ─────────────────────────────────────────────────────────────────────
+
+def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sell=False):
     if dry_run_override is not None:
         Config.DRY_RUN = dry_run_override
 
@@ -265,7 +338,7 @@ def run(dry_run_override=None, scan_only=False):
         notifier.notify_error(f"Init gagal: {e}")
         return
 
-    # Startup notification (anti-spam: max 1x per jam)
+    # Startup notif (anti-spam: max 1x per jam)
     if risk.should_send_startup_notif():
         notifier.notify_startup()
 
@@ -277,11 +350,24 @@ def run(dry_run_override=None, scan_only=False):
         f"Compound: Rp {status['compound_profit']:,.0f}"
     )
 
+    # ── MANUAL: Force Sell ──────────────────────────────────────────
+    if force_sell:
+        logger.info("Mode: FORCE SELL semua posisi")
+        run_force_sell(exchange, risk)
+        risk.save_state()
+        return
+
+    # ── MANUAL: Force Buy ───────────────────────────────────────────
+    if force_buy_symbol:
+        logger.info(f"Mode: FORCE BUY {force_buy_symbol}")
+        run_force_buy(exchange, risk, force_buy_symbol)
+        risk.save_state()
+        return
+
     # ── PHASE 1: Reconcile state vs exchange balance ────────────────
     if not Config.DRY_RUN and not scan_only:
         try:
-            balance = get_balance(exchange)
-            # Ambil harga saat ini untuk holdings
+            balance        = get_balance(exchange)
             current_prices = {}
             for asset in balance["holdings"]:
                 pair  = f"{asset}/{Config.BASE_CURRENCY}"
@@ -298,15 +384,15 @@ def run(dry_run_override=None, scan_only=False):
         if sold:
             risk.save_state()
 
-    # ── PHASE 3: SCAN semua coin ────────────────────────────────────
+    # ── PHASE 3: SCAN ───────────────────────────────────────────────
     rankings = scan_all_coins(exchange)
     if not rankings:
         logger.warning("Tidak ada coin yang bisa di-scan")
         risk.save_state()
         return
 
-    top    = rankings[0]
-    buys   = [c for c in rankings if c.get("action") == "BUY"]
+    top  = rankings[0]
+    buys = [c for c in rankings if c.get("action") == "BUY"]
     logger.info(
         f"Top: {top['symbol']} ({top['score']}/100 {top['action']}) | "
         f"BUY signals: {len(buys)}"
@@ -315,15 +401,15 @@ def run(dry_run_override=None, scan_only=False):
 
     if scan_only:
         risk.save_state()
-        logger.info("Scan-only mode, selesai.")
+        logger.info("Scan-only selesai.")
         return
 
-    # ── PHASE 4: ENTRY — Beli kalau tidak ada posisi ───────────────
+    # ── PHASE 4: ENTRY — Beli kalau belum ada posisi ───────────────
     current_positions = len(risk.state.get("positions", []))
     if current_positions < Config.MAX_OPEN_POSITIONS:
         try_buy_best_coin(exchange, risk, rankings)
     else:
-        logger.info(f"Posisi sudah penuh ({current_positions}/{Config.MAX_OPEN_POSITIONS}), skip beli")
+        logger.info(f"Posisi penuh ({current_positions}/{Config.MAX_OPEN_POSITIONS}), skip beli")
 
     # ── PHASE 5: Save & Summary ─────────────────────────────────────
     risk.save_state()
@@ -331,15 +417,44 @@ def run(dry_run_override=None, scan_only=False):
     notifier.notify_daily_summary(final)
     logger.info(
         f"Selesai: {final['trades_today']} trades | "
-        f"PnL hari ini: Rp {final['daily_pnl']:,.0f} | "
+        f"PnL: Rp {final['daily_pnl']:,.0f} | "
         f"Win rate: {final['win_rate']}%"
     )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
-    dry_run   = None
-    scan_only = False
-    if "--dry-run" in sys.argv:   dry_run   = True
-    if "--live" in sys.argv:      dry_run   = False
-    if "--scan-only" in sys.argv: scan_only = True
-    run(dry_run_override=dry_run, scan_only=scan_only)
+    dry_run          = None
+    scan_only        = False
+    force_buy_symbol = None
+    force_sell       = False
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--dry-run":
+            dry_run = True
+        elif arg == "--live":
+            dry_run = False
+        elif arg == "--scan-only":
+            scan_only = True
+        elif arg == "--force-sell":
+            force_sell = True
+            dry_run = False  # Force sell selalu live
+        elif arg == "--force-buy":
+            i += 1
+            if i < len(args):
+                force_buy_symbol = args[i]
+                dry_run = False  # Force buy selalu live
+        i += 1
+
+    run(
+        dry_run_override=dry_run,
+        scan_only=scan_only,
+        force_buy_symbol=force_buy_symbol,
+        force_sell=force_sell,
+    )
