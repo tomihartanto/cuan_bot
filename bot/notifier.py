@@ -1,5 +1,5 @@
 """
-CuanBot - Telegram Notifications v3
+CuanBot v4 - Telegram Notifications
 Notifikasi yang lebih informatif dengan ringkasan P&L lengkap.
 """
 
@@ -122,7 +122,7 @@ def notify_startup():
     compound = "ON" if Config.AUTO_COMPOUND else "OFF"
 
     send_telegram(
-        f"🤖 <b>CuanBot v3 — Siap Trading!</b>\n"
+        f"🤖 <b>CuanBot v4 — Siap Trading!</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"Mode     : {mode}\n"
         f"Modal    : Rp {Config.INITIAL_TRADE_AMOUNT:,.0f}\n"

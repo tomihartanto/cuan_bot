@@ -1,5 +1,5 @@
 """
-CuanBot - Exchange Connection v6
+CuanBot v4 - Exchange Connection
 Fix: quoteOrderQty untuk market buy, validasi minimum order, price fetching yang reliable.
 """
 
