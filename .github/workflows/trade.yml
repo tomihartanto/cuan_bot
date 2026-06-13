@@ -86,6 +86,10 @@ jobs:
             echo "Belum ada branch state, mulai fresh"
           fi
 
+      # ── 3.5. Set up WARP (Bypass Geo-blocking) ───────────────────
+      - name: Set up WARP
+        uses: fscarmen/warp-on-actions@v1.4
+
       # ── 4. Jalankan Bot ──────────────────────────────────────────
       - name: Run CuanBot
         env:
