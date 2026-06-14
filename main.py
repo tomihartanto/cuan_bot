@@ -28,7 +28,7 @@ from config import Config
 from bot.exchange import (
     create_exchange, get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
-    check_and_allocate_funds, get_usdt_idr_rate,
+    check_idr_balance,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
@@ -155,7 +155,7 @@ def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
         "sell", symbol, amount, actual_price, 0, reason,
         dry_run=result.get("dry_run", False),
         pnl=pnl_data,
-        compound=status.get("compound_profit"),
+        compound=status.get("realized_pnl"),
     )
     return True
 
@@ -164,16 +164,13 @@ def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
 # ENTRY — Beli Coin Terbaik dari Scan
 # ─────────────────────────────────────────────────────────────────────
 
-def try_buy_best_coin(exchange, risk: RiskManager, rankings: list) -> bool:
+def try_buy_best_coin(exchange, risk: RiskManager, rankings: list, available_balance: float) -> bool:
     """Beli coin dengan sinyal terkuat dari hasil scan."""
-    can, reason = risk.can_trade()
+    can, reason = risk.can_trade(available_balance)
     if not can:
         logger.info(f"Tidak bisa beli: {reason}")
-        if "Emergency stop" in reason:
-            notifier.notify_emergency_stop(
-                risk.state.get("consecutive_losses", 0),
-                Config.EMERGENCY_PAUSE_HOURS,
-            )
+        if "Emergency stop" in reason or "Daily loss limit" in reason or "Win rate rendah" in reason:
+            notifier.notify_error(f"Bot pause otomatis:\n{reason}")
         return False
 
     buy_candidates = [
@@ -188,30 +185,31 @@ def try_buy_best_coin(exchange, risk: RiskManager, rankings: list) -> bool:
     return _execute_buy(exchange, risk, buy_candidates[0], buy_candidates[0]["reason"])
 
 
-def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str) -> bool:
+def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = False) -> bool:
     """Eksekusi satu buy order."""
-    symbol    = coin["symbol"]
-    price     = coin["price"]
-    score     = coin.get("score", 0)
-    trade_amt = Config.get_trade_amount()
+    symbol = coin["symbol"]
+    price  = coin["price"]
+    score  = coin.get("score", 0)
 
-    # ── AI Filter Check (Z.ai GLM-5.1) ──
-    ai_ok, ai_reason = filter_buy_signal(symbol, coin)
-    if not ai_ok:
-        logger.info(f"BUY {symbol} dibatalkan oleh AI. Alasan: {ai_reason}")
-        notifier.send_telegram(
-            f"🤖 <b>AI Filter: HOLD {symbol}</b>\n"
-            f"Skor Teknis: {score}/100\n"
-            f"Alasan AI: {ai_reason}"
-        )
-        return False
-    elif Config.ZAI_API_KEY:
-        reason = f"{reason} | AI Approved"
+    # ── AI Filter Check (Z.ai GLM-5.2) ──
+    # Dilewati untuk force-buy (manual override)
+    if not bypass_ai:
+        ai_ok, ai_reason = filter_buy_signal(symbol, coin)
+        if not ai_ok:
+            logger.info(f"BUY {symbol} dibatalkan oleh AI. Alasan: {ai_reason}")
+            notifier.send_telegram(
+                f"🤖 <b>AI Filter: HOLD {symbol}</b>\n"
+                f"Skor Teknis: {score}/100\n"
+                f"Alasan AI: {ai_reason}"
+            )
+            return False
+        elif Config.ZAI_API_KEY:
+            reason = f"{reason} | AI Approved"
+    else:
+        logger.info(f"AI filter dilewati untuk {symbol} (force-buy/manual override)")
+        reason = f"{reason} | AI Bypassed"
 
-    if trade_amt < Config.MIN_ORDER_IDR:
-        logger.warning(f"Modal terlalu kecil: {Config.BASE_CURRENCY} {trade_amt:,.2f} < min {Config.BASE_CURRENCY} {Config.MIN_ORDER_IDR:,.2f}")
-        return False
-
+    # Ambil saldo riil untuk dynamic sizing
     try:
         balance   = get_balance(exchange)
         available = balance["quote"]["free"]
@@ -220,12 +218,18 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str) -> bool:
         notifier.notify_error(f"Gagal mengambil saldo Tokocrypto (Kemungkinan API key di-blok/expired):\n{e}")
         return False
 
-    if available < trade_amt:
-        logger.warning(f"{Config.BASE_CURRENCY} tidak cukup: {available:,.2f} < {trade_amt:,.2f}")
-        notifier.notify_error(f"Saldo {Config.BASE_CURRENCY} tidak cukup: {available:,.2f}")
+    # Dynamic position sizing: persentase dari saldo riil
+    trade_amt = Config.get_trade_amount(available)
+    if trade_amt < Config.MIN_ORDER_IDR:
+        logger.warning(f"Modal terlalu kecil: Rp {trade_amt:,.2f} < min Rp {Config.MIN_ORDER_IDR:,.2f} (saldo Rp {available:,.0f})")
         return False
 
-    logger.info(f"BUY {symbol} | Skor: {score}/100 | {Config.BASE_CURRENCY} {price:,.2f} | Alasan: {reason}")
+    if available < trade_amt:
+        logger.warning(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
+        notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
+        return False
+
+    logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.2f} | Modal: Rp {trade_amt:,.0f} (dari saldo Rp {available:,.0f}) | Alasan: {reason}")
     result = place_order(exchange, symbol, "buy", amount_idr=trade_amt, price=price)
 
     if result.get("error"):
@@ -241,13 +245,13 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str) -> bool:
 
     logger.info(
         f"BELI BERHASIL: {symbol} | {filled_qty:.6f} crypto | "
-        f"{Config.BASE_CURRENCY} {filled_price:,.2f}/unit | Total: {Config.BASE_CURRENCY} {trade_amt:,.2f}"
+        f"Rp {filled_price:,.2f}/unit | Total: Rp {trade_amt:,.2f}"
     )
-    status = risk.get_status()
+    status = risk.get_status(available)
     notifier.notify_trade(
         "buy", symbol, filled_qty, filled_price, score, reason,
         dry_run=result.get("dry_run", False),
-        compound=status.get("compound_profit"),
+        compound=status.get("realized_pnl"),
     )
     return True
 
@@ -269,8 +273,15 @@ def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
     logger.info(f"[FORCE BUY] Request: {sym}")
     notifier.send_telegram(f"[FORCE BUY] Request masuk untuk <b>{sym}</b>...")
 
-    # Cek posisi dulu
-    can, reason = risk.can_trade()
+    # Cek saldo & posisi dulu
+    try:
+        bal = get_balance(exchange)
+        available_balance = bal["quote"]["free"]
+    except Exception as e:
+        notifier.notify_error(f"Force buy gagal ambil saldo: {e}")
+        return
+
+    can, reason = risk.can_trade(available_balance)
     if not can:
         msg = f"Force buy dibatalkan: {reason}"
         logger.warning(msg)
@@ -299,7 +310,7 @@ def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
         pass
 
     coin = {"symbol": sym, "price": price, "score": score, "falling_knife": False}
-    _execute_buy(exchange, risk, coin, f"Manual force buy dari GitHub | Score: {score}/100")
+    _execute_buy(exchange, risk, coin, f"Manual force buy dari GitHub | Score: {score}/100", bypass_ai=True)
 
 
 def run_force_sell(exchange, risk: RiskManager):
@@ -353,43 +364,27 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     # Init
     try:
         exchange = create_exchange()
-        
-        # ── Deteksi Saldo & Alokasi Currency Dinamis ──
-        try:
-            active_currency, available_balance = check_and_allocate_funds(exchange)
-            if active_currency == "NONE":
-                logger.warning("Saldo tidak mencukupi untuk trading di IDR maupun USDT")
-                notifier.send_telegram("⚠️ <b>CuanBot Saldo Tidak Cukup</b>\nSaldo Anda kurang dari Rp 10.000 IDR dan kurang dari 10 USDT. Bot tidak dapat memulai transaksi. Silakan top up.")
-                return
-            Config.setup_currency(active_currency)
-        except Exception as e:
-            logger.warning(f"Gagal mendeteksi saldo secara dinamis ({e}). Fallback ke config default.")
-            Config.setup_currency(Config.BASE_CURRENCY)
+
+        # ── Cek Saldo IDR ──
+        available_balance = check_idr_balance(exchange)
+        if available_balance < Config.MIN_ORDER_IDR:
+            logger.warning(
+                f"Saldo IDR tidak cukup: Rp {available_balance:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}"
+            )
+            notifier.send_telegram(
+                f"⚠️ <b>CuanBot Saldo Tidak Cukup</b>\n"
+                f"Saldo IDR Anda (Rp {available_balance:,.0f}) kurang dari minimum "
+                f"(Rp {Config.MIN_ORDER_IDR:,.0f}). Silakan top up."
+            )
+            return
 
         risk = RiskManager()
 
-        # Reconcile state currency jika terdeteksi perubahan mata uang aktif
-        saved_currency = risk.state.get("currency", "IDR")
-        if saved_currency != Config.BASE_CURRENCY:
-            logger.info(f"Mata uang di state ({saved_currency}) berbeda dengan mata uang aktif ({Config.BASE_CURRENCY}). Melakukan konversi state...")
-            try:
-                rate = get_usdt_idr_rate()
-                if saved_currency == "IDR" and Config.BASE_CURRENCY == "USDT":
-                    # Konversi IDR -> USDT
-                    risk.state["daily_pnl"] = risk.state.get("daily_pnl", 0.0) / rate
-                    risk.state["total_pnl"] = risk.state.get("total_pnl", 0.0) / rate
-                    risk.state["compound_profit"] = risk.state.get("compound_profit", 0.0) / rate
-                elif saved_currency == "USDT" and Config.BASE_CURRENCY == "IDR":
-                    # Konversi USDT -> IDR
-                    risk.state["daily_pnl"] = risk.state.get("daily_pnl", 0.0) * rate
-                    risk.state["total_pnl"] = risk.state.get("total_pnl", 0.0) * rate
-                    risk.state["compound_profit"] = risk.state.get("compound_profit", 0.0) * rate
-                
-                risk.state["currency"] = Config.BASE_CURRENCY
-                risk.save_state()
-                logger.info(f"State berhasil dikonversi ke {Config.BASE_CURRENCY}.")
-            except Exception as e:
-                logger.error(f"Gagal mengonversi state: {e}")
+        # ── Snapshot saldo awal hari (untuk daily loss limit) ──
+        if risk.state.get("day_start_balance") is None:
+            risk.state["day_start_balance"] = available_balance
+            risk.save_state()
+            logger.info(f"Day start balance diset: Rp {available_balance:,.0f}")
 
     except Exception as e:
         logger.error(f"Init gagal: {e}")
@@ -400,12 +395,13 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     if risk.should_send_startup_notif():
         notifier.notify_startup()
 
-    status = risk.get_status()
+    status = risk.get_status(available_balance)
     logger.info(
         f"Status: {status['trades_today']}/{status['max_trades']} trades | "
-        f"{status['open_positions']} posisi | "
+        f"{status['open_positions']}/{status['max_positions']} posisi | "
+        f"Modal/trade: Rp {status['current_trade_amount']:,.0f} | "
         f"PnL hari ini: Rp {status['daily_pnl']:,.0f} | "
-        f"Compound: Rp {status['compound_profit']:,.0f}"
+        f"Realized PnL: Rp {status['realized_pnl']:,.0f}"
     )
 
     # ── MANUAL: Force Sell ──────────────────────────────────────────
@@ -469,14 +465,15 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
     # ── PHASE 4: ENTRY — Beli kalau belum ada posisi ───────────────
     current_positions = len(risk.state.get("positions", []))
-    if current_positions < Config.MAX_OPEN_POSITIONS:
-        try_buy_best_coin(exchange, risk, rankings)
+    max_positions     = Config.get_max_positions(available_balance)
+    if current_positions < max_positions:
+        try_buy_best_coin(exchange, risk, rankings, available_balance)
     else:
-        logger.info(f"Posisi penuh ({current_positions}/{Config.MAX_OPEN_POSITIONS}), skip beli")
+        logger.info(f"Posisi penuh ({current_positions}/{max_positions}), skip beli")
 
     # ── PHASE 5: Save & Summary ─────────────────────────────────────
     risk.save_state()
-    final = risk.get_status()
+    final = risk.get_status(available_balance)
     notifier.notify_daily_summary(final)
     logger.info(
         f"Selesai: {final['trades_today']} trades | "

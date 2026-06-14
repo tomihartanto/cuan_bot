@@ -30,10 +30,12 @@ class RiskManager:
             "total_losses":       0,
             "last_reset":         None,
             "last_run":           None,
-            "compound_profit":    0.0,
+            "compound_profit":    0.0,   # Sekarang: statistik realized PnL (penuh, bukan untuk sizing)
             "consecutive_losses": 0,
             "last_loss_time":     None,
             "last_startup_notif": None,
+            "recent_results":     [],    # History win/loss untuk win-rate guard
+            "day_start_balance":  None,  # Snapshot saldo awal hari (untuk daily loss limit)
         }
         try:
             if os.path.exists(self.state_file):
@@ -60,18 +62,22 @@ class RiskManager:
             logger.info("Reset harian: trades_today & daily_pnl direset")
             self.state["trades_today"] = []
             self.state["daily_pnl"]    = 0.0
+            self.state["day_start_balance"] = None  # akan di-set oleh main.py di run pertama hari itu
             self.state["last_reset"]   = today
 
     # ── Trading Gate ──────────────────────────────────────────────────
 
-    def can_trade(self) -> tuple:
-        """Return (bool, reason_str). False = jangan beli."""
+    def can_trade(self, available_balance: float = None) -> tuple:
+        """
+        Return (bool, reason_str). False = jangan beli.
+        available_balance: saldo IDR riil untuk hitung max posisi dinamis.
+        """
         self._reset_daily_if_needed()
         from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
 
-        # ── 1. Emergency stop ─────────────────────────────────────────
+        # ── 1. Emergency stop (3x rugi berturut) ──────────────────────
         consecutive = self.state.get("consecutive_losses", 0)
         if consecutive >= Config.EMERGENCY_STOP_LOSSES:
             last_loss = self.state.get("last_loss_time")
@@ -90,17 +96,39 @@ class RiskManager:
                 except Exception as e:
                     logger.warning(f"Emergency stop check error: {e}")
 
-        # ── 2. Max open positions ─────────────────────────────────────
-        open_pos = len(self.state.get("positions", []))
-        if open_pos >= Config.MAX_OPEN_POSITIONS:
-            return False, f"Posisi penuh ({open_pos}/{Config.MAX_OPEN_POSITIONS})"
+        # ── 2. Daily loss limit ───────────────────────────────────────
+        day_start = self.state.get("day_start_balance") or 0
+        if day_start > 0:
+            daily_pnl   = self.state.get("daily_pnl", 0.0)
+            loss_limit  = -(day_start * Config.DAILY_LOSS_LIMIT_PCT / 100)
+            if daily_pnl <= loss_limit:
+                return False, (f"🛑 Daily loss limit tercapai (rugi Rp {daily_pnl:,.0f} "
+                               f">= -{Config.DAILY_LOSS_LIMIT_PCT}% dari Rp {day_start:,.0f})")
 
-        # ── 3. Max trades per hari ────────────────────────────────────
+        # ── 3. Win-rate guard (rolling N trade) ───────────────────────
+        recent = self.state.get("recent_results", [])
+        if len(recent) >= Config.WIN_RATE_GUARD_TRADES:
+            wins    = recent.count("win")
+            win_pct = wins / len(recent) * 100
+            if win_pct < Config.WIN_RATE_GUARD_MIN:
+                return False, (f"⚠️ Win rate rendah ({win_pct:.0f}% dari {len(recent)} "
+                               f"trade terakhir < {Config.WIN_RATE_GUARD_MIN}%) — pause evaluasi")
+
+        # ── 4. Max open positions (dinamis by saldo) ──────────────────
+        open_pos = len(self.state.get("positions", []))
+        if available_balance and available_balance > 0:
+            max_pos = Config.get_max_positions(available_balance)
+        else:
+            max_pos = Config.MAX_OPEN_POSITIONS
+        if open_pos >= max_pos:
+            return False, f"Posisi penuh ({open_pos}/{max_pos})"
+
+        # ── 5. Max trades per hari ────────────────────────────────────
         trades_today = len(self.state.get("trades_today", []))
         if trades_today >= Config.MAX_TRADES_PER_DAY:
             return False, f"Max trades hari ini ({trades_today}/{Config.MAX_TRADES_PER_DAY})"
 
-        # ── 4. Cooldown antar trade ───────────────────────────────────
+        # ── 6. Cooldown antar trade ───────────────────────────────────
         last_time = self.state.get("last_trade_time")
         if last_time:
             try:
@@ -166,20 +194,21 @@ class RiskManager:
 
             self.state["daily_pnl"] += pnl_idr
             self.state["total_pnl"] += pnl_idr
+            self.state["compound_profit"] = self.state.get("compound_profit", 0.0) + pnl_idr  # Realized PnL penuh
+
+            # Track recent results untuk win-rate guard
+            recent = self.state.setdefault("recent_results", [])
+            recent.append("win" if pnl_pct > 0 else "loss")
+            if len(recent) > Config.WIN_RATE_GUARD_TRADES:
+                recent.pop(0)
 
             if pnl_pct > 0:
                 self.state["total_wins"]         += 1
                 self.state["consecutive_losses"]  = 0
-                if Config.AUTO_COMPOUND:
-                    self.state["compound_profit"] += abs(pnl_idr)
             else:
                 self.state["total_losses"]        += 1
                 self.state["consecutive_losses"]  = self.state.get("consecutive_losses", 0) + 1
                 self.state["last_loss_time"]      = datetime.now(timezone.utc).isoformat()
-                if Config.AUTO_COMPOUND:
-                    self.state["compound_profit"]  = max(
-                        0, self.state.get("compound_profit", 0) - abs(pnl_idr) * 0.5
-                    )
                 if self.state["consecutive_losses"] >= Config.EMERGENCY_STOP_LOSSES:
                     logger.warning(
                         f"🛑 Emergency stop! {self.state['consecutive_losses']}x rugi berturut-turut. "
@@ -225,12 +254,21 @@ class RiskManager:
 
             # Update trailing high
             if price > pos.get("highest_price", entry):
-                pos["highest_price"]      = price
+                pos["highest_price"] = price
+
+            # Trailing baru aktif setelah profit mencapai TRAILING_ACTIVATION%
+            profit_pct = (price - entry) / entry * 100
+            if (Config.TRAILING_STOP_ENABLED
+                    and not pos.get("trailing_activated", False)
+                    and profit_pct >= Config.TRAILING_ACTIVATION):
                 pos["trailing_activated"] = True
-                if Config.TRAILING_STOP_ENABLED:
-                    new_trailing = price * (1 - Config.TRAILING_PERCENT / 100)
-                    if new_trailing > pos.get("trailing_stop", 0):
-                        pos["trailing_stop"] = new_trailing
+                logger.info(f"Trailing stop aktif untuk {symbol} (profit {profit_pct:+.2f}%)")
+
+            # Update trailing stop hanya kalau sudah aktif
+            if pos.get("trailing_activated", False):
+                new_trailing = price * (1 - Config.TRAILING_PERCENT / 100)
+                if new_trailing > pos.get("trailing_stop", 0):
+                    pos["trailing_stop"] = new_trailing
 
             # ── Check exits ────────────────────────────────────────
             reason = None
@@ -320,15 +358,17 @@ class RiskManager:
 
     # ── Status & Summary ──────────────────────────────────────────────
 
-    def get_status(self) -> dict:
+    def get_status(self, available_balance: float = None) -> dict:
         self._reset_daily_if_needed()
         total = max(1, self.state.get("total_trades", 0))
         wins  = self.state.get("total_wins", 0)
         losses = self.state.get("total_losses", 0)
+        max_pos = Config.get_max_positions(available_balance) if available_balance else Config.MAX_OPEN_POSITIONS
         return {
             "trades_today":         len(self.state.get("trades_today", [])),
             "max_trades":           Config.MAX_TRADES_PER_DAY,
             "open_positions":       len(self.state.get("positions", [])),
+            "max_positions":        max_pos,
             "positions":            self.state.get("positions", []),
             "daily_pnl":            round(self.state.get("daily_pnl", 0), 2),
             "total_pnl":            round(self.state.get("total_pnl", 0), 2),
@@ -336,9 +376,10 @@ class RiskManager:
             "total_wins":           wins,
             "total_losses":         losses,
             "win_rate":             round(wins / total * 100, 1),
-            "compound_profit":      round(self.state.get("compound_profit", 0), 2),
-            "current_trade_amount": round(Config.get_trade_amount(), 2),
+            "realized_pnl":         round(self.state.get("compound_profit", 0), 2),
+            "current_trade_amount": round(Config.get_trade_amount(available_balance), 2),
             "consecutive_losses":   self.state.get("consecutive_losses", 0),
+            "day_start_balance":    self.state.get("day_start_balance"),
         }
 
     def should_send_startup_notif(self) -> bool:

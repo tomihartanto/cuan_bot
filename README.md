@@ -1,6 +1,6 @@
 # 🤖 CuanBot v4 - Smart Crypto Investment Manager
 
-Bot trading otomatis untuk Tokocrypto. Scan 25 coin, analisa teknikal multi-timeframe (EMA + RSI + MACD + Bollinger), dan auto-trade — jalan 24/7 di GitHub Actions, gratis.
+Bot trading otomatis untuk Tokocrypto. Scan 25+ coin, analisa teknikal multi-timeframe (EMA + RSI + MACD + Bollinger), filter AI (Z.ai GLM-5.2), dan auto-trade — jalan 24/7 di GitHub Actions, gratis.
 
 ## 🏗️ Arsitektur
 
@@ -95,15 +95,20 @@ Buka: **Actions → CuanBot v4 → Run workflow**
 
 | Fitur | Default | Keterangan |
 |---|---|---|
-| Take Profit | 1.8% | Auto-sell kalau profit 1.8% |
-| Stop Loss | 1.2% | Auto-sell kalau rugi 1.2% |
-| Trailing Stop | 0.5% | Lock profit saat harga naik |
-| Max Posisi | 1 | Hanya 1 posisi aktif |
-| Cooldown | 10 menit | Jeda antar trade |
+| Take Profit | 2.5% | Auto-sell kalau profit 2.5% (fee-aware) |
+| Stop Loss | 1.8% | Auto-sell kalau rugi 1.8% (fee-aware) |
+| Trailing Stop | 0.5% | Lock profit saat harga naik (aktif di +0.8%) |
+| Max Posisi | Dinamis | 1 posisi per ~Rp 50k saldo (cap 5) |
+| Cooldown | 5 menit | Jeda antar trade |
 | Max/Hari | 10 | Max 10 trade per hari |
 | Timeout | 6 jam | Auto-sell posisi nyangkut |
 | Emergency | 3x rugi | Pause 2 jam kalau 3x rugi berturut |
-| Auto Compound | ON | Reinvest profit otomatis |
+| Daily Loss Limit | 3% | Stop trading kalau rugi hari itu ≥ 3% saldo |
+| Win-rate Guard | <45% | Pause kalau win rate 20 trade terakhir < 45% |
+| Capital Deployment | 85% | 85% saldo diputar, 15% buffer fee/slippage |
+
+**Modal sizing dinamis**: bot pakai saldo riil Tokocrypto, bukan angka fix.
+`per_trade = (saldo × 85%) / jumlah_posisi`. Otomatis scale naik/turun.
 
 ## ⚠️ DISCLAIMER
 

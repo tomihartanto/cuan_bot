@@ -29,6 +29,15 @@ on:
         required: false
         default: ""
 
+# ─────────────────────────────────────────────────────────────────────
+# CONCURRENCY: Hanya 1 run boleh eksekusi pada satu waktu.
+# Run baru jadi pending (tidak membatalkan run aktif), pending lama diganti
+# pending baru → mencegah race condition saat menulis state.json.
+# ─────────────────────────────────────────────────────────────────────
+concurrency:
+  group: trade
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

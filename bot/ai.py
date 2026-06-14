@@ -1,6 +1,6 @@
 """
-CuanBot v4 - AI Decision Support (Z.ai GLM-5.1)
-Menggunakan model GLM-5.1 untuk menyaring sinyal BUY dari indikator teknikal.
+CuanBot v4 - AI Decision Support (Z.ai GLM-5.2)
+Menggunakan model GLM-5.2 untuk menyaring sinyal BUY dari indikator teknikal.
 """
 
 import requests
@@ -12,7 +12,7 @@ logger = logging.getLogger("cuanbot")
 
 def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     """
-    Kirim data teknikal ke Z.ai GLM-5.1 untuk analisis tambahan.
+    Kirim data teknikal ke Z.ai GLM-5.2 untuk analisis tambahan.
     
     Returns:
         (bool, str): (apakah disetujui BUY, alasan/penjelasan AI)
@@ -20,7 +20,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     if not Config.ZAI_API_KEY:
         return True, "AI tidak aktif (ZAI_API_KEY kosong). Sinyal indikator diloloskan."
 
-    logger.info(f"Meminta analisis AI Z.ai (GLM-5.1) untuk {symbol}...")
+    logger.info(f"Meminta analisis AI Z.ai (GLM-5.2) untuk {symbol}...")
 
     # Data indicators
     signals = score_data.get("signals", {})
@@ -68,7 +68,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
             "Content-Type": "application/json"
         }
         data = {
-            "model": "glm-5.1",
+            "model": "glm-5.2",
             "messages": [
                 {"role": "user", "content": prompt}
             ],
@@ -89,7 +89,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
             return False, content
 
     except Exception as e:
-        err_msg = f"Gagal menghubungi API Z.ai (GLM-5.1): {e}"
+        err_msg = f"Gagal menghubungi API Z.ai (GLM-5.2): {e}"
         logger.warning(err_msg)
         # Fallback ke True agar bot tidak mati jika API Z.ai down
         return True, f"⚠️ Fallback (AI Error): {e}. Meloloskan sinyal teknikal."

@@ -19,20 +19,26 @@ class Config:
     # ── Mode ──────────────────────────────────────────────────────────
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
-    # ── Modal & Compound ──────────────────────────────────────────────
-    BASE_CURRENCY        = os.getenv("BASE_CURRENCY", "IDR")
-    INITIAL_TRADE_AMOUNT = float(os.getenv("INITIAL_TRADE_AMOUNT", "11000"))  # Min order Tokocrypto ~11k
-    MAX_TRADE_AMOUNT     = float(os.getenv("MAX_TRADE_AMOUNT", "50000"))
-    AUTO_COMPOUND        = os.getenv("AUTO_COMPOUND", "true").lower() == "true"
-    MIN_ORDER_IDR        = float(os.getenv("MIN_ORDER_IDR", "11000"))  # Minimum notional Tokocrypto
+    # ── Modal & Dynamic Capital Deployment ────────────────────────────
+    BASE_CURRENCY          = "IDR"  # Tokocrypto IDR-only
+    INITIAL_TRADE_AMOUNT   = float(os.getenv("INITIAL_TRADE_AMOUNT", "10000"))  # Fallback / display
+    MIN_ORDER_IDR          = float(os.getenv("MIN_ORDER_IDR", "10000"))  # Min notional Tokocrypto (~10k IDR)
+    WORKING_CAPITAL_PCT    = float(os.getenv("WORKING_CAPITAL_PCT", "0.85"))  # 85% saldo diputar, 15% buffer
+    MIN_CAPITAL_PER_POSITION = float(os.getenv("MIN_CAPITAL_PER_POSITION", "50000"))  # Modal ideal per posisi
+    AUTO_COMPOUND          = os.getenv("AUTO_COMPOUND", "true").lower() == "true"
 
     # ── Risk & Profit ─────────────────────────────────────────────────
-    TAKE_PROFIT_PERCENT  = float(os.getenv("TAKE_PROFIT_PERCENT", "1.8"))   # 1.8% TP
-    STOP_LOSS_PERCENT    = float(os.getenv("STOP_LOSS_PERCENT", "1.2"))     # 1.2% SL → R:R = 1:1.5
+    TAKE_PROFIT_PERCENT  = float(os.getenv("TAKE_PROFIT_PERCENT", "2.5"))   # 2.5% TP (fee-aware)
+    STOP_LOSS_PERCENT    = float(os.getenv("STOP_LOSS_PERCENT", "1.8"))     # 1.8% SL (fee-aware)
     MAX_TRADES_PER_DAY   = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
-    COOLDOWN_MINUTES     = int(os.getenv("COOLDOWN_MINUTES", "10"))
-    MAX_OPEN_POSITIONS   = int(os.getenv("MAX_OPEN_POSITIONS", "1"))        # 1 posisi saja (modal kecil)
+    COOLDOWN_MINUTES     = int(os.getenv("COOLDOWN_MINUTES", "5"))
+    MAX_OPEN_POSITIONS   = int(os.getenv("MAX_OPEN_POSITIONS", "5"))        # Cap maksimal posisi paralel
     POSITION_TIMEOUT_HOURS = float(os.getenv("POSITION_TIMEOUT_HOURS", "6"))  # Auto-sell kalau nyangkut 6 jam
+
+    # ── Safety Nets ───────────────────────────────────────────────────
+    DAILY_LOSS_LIMIT_PCT   = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0"))   # Stop hari itu kalau rugi >= 3% saldo awal hari
+    WIN_RATE_GUARD_TRADES = int(os.getenv("WIN_RATE_GUARD_TRADES", "20"))      # Cek win rate dari N trade terakhir
+    WIN_RATE_GUARD_MIN    = float(os.getenv("WIN_RATE_GUARD_MIN", "45"))       # Pause kalau win rate < 45%
 
     # ── Trailing Stop ─────────────────────────────────────────────────
     TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "true").lower() == "true"
@@ -47,7 +53,7 @@ class Config:
     EMERGENCY_STOP_LOSSES = int(os.getenv("EMERGENCY_STOP_LOSSES", "3"))
     EMERGENCY_PAUSE_HOURS = float(os.getenv("EMERGENCY_PAUSE_HOURS", "2"))
 
-    # ── Coin List (Universal: disaring dinamis oleh exchange.py berdasarkan IDR/USDT) ───
+    # ── Coin List (Disaring dinamis oleh exchange.py berdasarkan pair IDR aktif di Tokocrypto) ───
     SCAN_COINS = [
         # Tier 1: Sangat likuid
         "BTC", "ETH", "BNB", "XRP", "SOL",
@@ -84,30 +90,39 @@ class Config:
     STATE_FILE = os.getenv("STATE_FILE", "state.json")
 
     @classmethod
-    def setup_currency(cls, currency: str):
-        """Atur parameter perdagangan secara dinamis berdasarkan base currency."""
-        cls.BASE_CURRENCY = currency
-        if currency == "USDT":
-            cls.INITIAL_TRADE_AMOUNT = 10.0
-            cls.MAX_TRADE_AMOUNT = 50.0
-            cls.MIN_ORDER_IDR = 10.0
-        else:
-            cls.BASE_CURRENCY = "IDR"
-            cls.INITIAL_TRADE_AMOUNT = 10000.0
-            cls.MAX_TRADE_AMOUNT = 50000.0
-            cls.MIN_ORDER_IDR = 10000.0
+    def get_working_capital(cls, available_balance: float) -> float:
+        """Total modal yang diputar = WORKING_CAPITAL_PCT × saldo."""
+        return available_balance * cls.WORKING_CAPITAL_PCT
 
     @classmethod
-    def get_trade_amount(cls) -> float:
-        """Hitung trade amount dengan compound profit."""
-        try:
-            import json
-            if os.path.exists(cls.STATE_FILE):
-                with open(cls.STATE_FILE, "r", encoding="utf-8-sig") as f:
-                    state = json.load(f)
-                    if cls.AUTO_COMPOUND:
-                        amount = cls.INITIAL_TRADE_AMOUNT + state.get("compound_profit", 0)
-                        return min(amount, cls.MAX_TRADE_AMOUNT)
-        except Exception:
-            pass
-        return cls.INITIAL_TRADE_AMOUNT
+    def get_max_positions(cls, available_balance: float) -> int:
+        """Hitung jumlah posisi paralel dinamis berdasarkan saldo."""
+        if available_balance < cls.MIN_ORDER_IDR:
+            return 0
+        working = cls.get_working_capital(available_balance)
+        n = max(1, int(working / cls.MIN_CAPITAL_PER_POSITION))
+        return min(n, cls.MAX_OPEN_POSITIONS)
+
+    @classmethod
+    def get_trade_amount(cls, available_balance: float = None) -> float:
+        """
+        Modal per posisi = working_capital / num_positions.
+        Berbasis saldo riil, otomatis scale naik/turun.
+        """
+        if not available_balance or available_balance <= 0:
+            return cls.INITIAL_TRADE_AMOUNT
+
+        n = cls.get_max_positions(available_balance)
+        if n == 0:
+            return 0.0
+
+        working   = cls.get_working_capital(available_balance)
+        per_trade = working / n
+
+        # Honor min order kalau saldo cukup
+        if per_trade < cls.MIN_ORDER_IDR and available_balance >= cls.MIN_ORDER_IDR:
+            per_trade = cls.MIN_ORDER_IDR
+
+        # Buffer dust: saldo besar sisain 2%, saldo kecil boleh pakai full
+        max_per_trade = available_balance * 0.98 if available_balance >= 50000 else available_balance
+        return min(per_trade, max_per_trade)

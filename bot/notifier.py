@@ -79,20 +79,21 @@ def notify_daily_summary(status: dict):
     cons_loss   = status.get("consecutive_losses", 0)
     stop_warn   = f"\n🛑 <b>WARNING:</b> {cons_loss}x rugi berturut-turut!" if cons_loss >= 2 else ""
 
-    compound_str = f"Rp {status.get('compound_profit', 0):,.0f}" if Config.AUTO_COMPOUND else "OFF"
+    compound_str = f"Rp {status.get('realized_pnl', 0):,.0f}" if Config.AUTO_COMPOUND else "OFF"
     trade_amt    = f"Rp {status.get('current_trade_amount', 0):,.0f}"
+    max_pos      = status.get("max_positions", "-")
 
     msg = (
         f"📊 <b>RINGKASAN SESI</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"🔢 Trade: {status['trades_today']}/{status['max_trades']}\n"
-        f"📂 Posisi terbuka: {status['open_positions']}{pos_lines}\n"
+        f"📂 Posisi: {status['open_positions']}/{max_pos}{pos_lines}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"{e_today} PnL hari ini : <b>Rp {pnl_today:,.0f}</b>\n"
         f"{e_total} PnL total    : <b>Rp {pnl_total:,.0f}</b>\n"
         f"🎯 Win rate   : {win_rate}% ({status.get('total_wins',0)}W/{status.get('total_losses',0)}L)\n"
         f"━━━━━━━━━━━━━━━━\n"
-        f"🔄 Compound pool : {compound_str}\n"
+        f"🔄 Realized PnL  : {compound_str}\n"
         f"💵 Modal per trade: {trade_amt}\n"
         f"📈 Trailing Stop : {'ON' if Config.TRAILING_STOP_ENABLED else 'OFF'}"
         f"{stop_warn}"
