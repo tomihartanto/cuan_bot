@@ -60,26 +60,30 @@ def create_exchange() -> ccxt.Exchange:
 
 
 def get_trade_pairs(exchange=None) -> list:
+    """
+    Return list pasangan IDR yang aktif & tersedia di Tokocrypto.
+    Safety: kalau load_markets gagal → return empty (tidak scan pair invalid).
+    """
     pairs = []
-    available_markets = None
-    if exchange is not None:
-        try:
-            exchange.load_markets()
-            available_markets = exchange.markets
-        except Exception as e:
-            logger.warning(f"Gagal memuat daftar market dari exchange: {e}")
+    if exchange is None:
+        logger.warning("Exchange tidak di-pass → tidak bisa verifikasi market, return empty.")
+        return pairs
+
+    try:
+        exchange.load_markets()
+    except Exception as e:
+        logger.error(f"Gagal memuat daftar market Tokocrypto: {e} — skip scan (safety)")
+        return pairs
 
     for s in Config.SCAN_COINS:
         pair = f"{s}/{Config.BASE_CURRENCY}"
-        if available_markets is not None:
-            if pair in available_markets:
-                pairs.append(pair)
-            else:
-                logger.warning(f"Pasang {pair} dilewati karena tidak tersedia di Tokocrypto.")
-        else:
+        market = exchange.markets.get(pair)
+        if market and market.get("active", True):
             pairs.append(pair)
+        else:
+            logger.warning(f"Pasang {pair} dilewati (tidak tersedia/aktif di Tokocrypto).")
 
-    logger.info(f"Scan {len(pairs)} pasang {Config.BASE_CURRENCY} dari {len(Config.SCAN_COINS)} di config")
+    logger.info(f"Scan {len(pairs)} pasang {Config.BASE_CURRENCY} aktif dari {len(Config.SCAN_COINS)} di config")
     return pairs
 
 

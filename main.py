@@ -229,6 +229,17 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str, bypass_ai
         notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
         return False
 
+    # Validasi pair IDR aktif di Tokocrypto (defense-in-depth sebelum order)
+    try:
+        exchange.load_markets()
+        market = exchange.markets.get(symbol)
+        if not market or not market.get("active", True):
+            logger.error(f"Pair {symbol} tidak tersedia/aktif di Tokocrypto! Skip buy.")
+            notifier.notify_error(f"Pair {symbol} tidak ada/aktif di Tokocrypto. Buy dibatalkan.")
+            return False
+    except Exception as e:
+        logger.warning(f"Tidak bisa verifikasi market {symbol}: {e} — lanjut percaya hasil scan")
+
     logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.2f} | Modal: Rp {trade_amt:,.0f} (dari saldo Rp {available:,.0f}) | Alasan: {reason}")
     result = place_order(exchange, symbol, "buy", amount_idr=trade_amt, price=price)
 
