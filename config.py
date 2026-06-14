@@ -13,6 +13,8 @@ class Config:
     # ── Credentials ──────────────────────────────────────────────────
     API_KEY    = os.getenv("TOKOCRYPTO_API_KEY", "")
     SECRET_KEY = os.getenv("TOKOCRYPTO_SECRET_KEY", "")
+    ZAI_API_KEY = os.getenv("ZAI_API_KEY", "")
+    ZAI_API_URL = os.getenv("ZAI_API_URL", "https://api.z.ai/api/paas/v4/")
 
     # ── Mode ──────────────────────────────────────────────────────────
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -45,19 +47,18 @@ class Config:
     EMERGENCY_STOP_LOSSES = int(os.getenv("EMERGENCY_STOP_LOSSES", "3"))
     EMERGENCY_PAUSE_HOURS = float(os.getenv("EMERGENCY_PAUSE_HOURS", "2"))
 
-    # ── Coin List (dikurasi: hanya pair IDR yang ada di Tokocrypto) ───
-    # Diprioritaskan: volatile, likuid, harga tidak terlalu tinggi
+    # ── Coin List (Universal: disaring dinamis oleh exchange.py berdasarkan IDR/USDT) ───
     SCAN_COINS = [
-        # Tier 1: Pasti ada, sangat likuid
+        # Tier 1: Sangat likuid
         "BTC", "ETH", "BNB", "XRP", "SOL",
-        # Tier 2: Harga murah, cocok untuk modal kecil
-        "ADA", "DOGE", "SHIB", "TRX", "NEAR",
-        # Tier 3: Volatile, potensi profit cepat
-        "AVAX", "DOT", "LINK", "UNI", "ATOM",
-        # Tier 4: Altcoin likuid di Tokocrypto
-        "LTC", "MATIC", "OP", "ARB", "HBAR",
-        # Tier 5: Meme & volatile (high risk high reward)
-        "FLOKI", "PEPE", "SUI", "TON", "SAND",
+        # Tier 2: Likuid & terjangkau
+        "ADA", "DOGE", "TKO", "WLD", "SHIB", "TRX", "NEAR",
+        # Tier 3: Volatile & trendsetter
+        "AVAX", "ONDO", "TAO", "POL", "DOT", "LINK", "UNI", "ATOM",
+        # Tier 4: Altcoin populer & aktif
+        "ARB", "HBAR", "RENDER", "LTC", "OP",
+        # Tier 5: Meme & volatile (high risk)
+        "FLOKI", "SUI", "TON", "WIF", "DOGS", "PEPE", "SAND",
     ]
 
     # ── Technical Indicators ──────────────────────────────────────────
@@ -81,6 +82,20 @@ class Config:
 
     # ── State File ────────────────────────────────────────────────────
     STATE_FILE = os.getenv("STATE_FILE", "state.json")
+
+    @classmethod
+    def setup_currency(cls, currency: str):
+        """Atur parameter perdagangan secara dinamis berdasarkan base currency."""
+        cls.BASE_CURRENCY = currency
+        if currency == "USDT":
+            cls.INITIAL_TRADE_AMOUNT = 10.0
+            cls.MAX_TRADE_AMOUNT = 50.0
+            cls.MIN_ORDER_IDR = 10.0
+        else:
+            cls.BASE_CURRENCY = "IDR"
+            cls.INITIAL_TRADE_AMOUNT = 10000.0
+            cls.MAX_TRADE_AMOUNT = 50000.0
+            cls.MIN_ORDER_IDR = 10000.0
 
     @classmethod
     def get_trade_amount(cls) -> float:

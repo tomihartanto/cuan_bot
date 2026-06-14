@@ -26,12 +26,14 @@ import time
 from datetime import datetime, timezone
 from config import Config
 from bot.exchange import (
-    create_exchange, get_idr_pairs, fetch_candles,
+    create_exchange, get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
+    check_and_allocate_funds, get_usdt_idr_rate,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
 from bot import notifier
+from bot.ai import filter_buy_signal
 
 # ── Logging ───────────────────────────────────────────────────────────
 log_dir = os.path.join(PROJECT_ROOT, "logs")
@@ -56,7 +58,7 @@ logger = logging.getLogger("cuanbot")
 
 def scan_all_coins(exchange) -> list:
     """Scan semua coin, return ranking dari skor tertinggi."""
-    pairs   = get_idr_pairs()
+    pairs   = get_trade_pairs(exchange)
     results = []
     scanned = 0
 
@@ -191,42 +193,55 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str) -> bool:
     symbol    = coin["symbol"]
     price     = coin["price"]
     score     = coin.get("score", 0)
-    trade_idr = Config.get_trade_amount()
+    trade_amt = Config.get_trade_amount()
 
-    if trade_idr < Config.MIN_ORDER_IDR:
-        logger.warning(f"Modal terlalu kecil: Rp {trade_idr:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}")
+    # ── AI Filter Check (Z.ai GLM-5.1) ──
+    ai_ok, ai_reason = filter_buy_signal(symbol, coin)
+    if not ai_ok:
+        logger.info(f"BUY {symbol} dibatalkan oleh AI. Alasan: {ai_reason}")
+        notifier.send_telegram(
+            f"🤖 <b>AI Filter: HOLD {symbol}</b>\n"
+            f"Skor Teknis: {score}/100\n"
+            f"Alasan AI: {ai_reason}"
+        )
+        return False
+    elif Config.ZAI_API_KEY:
+        reason = f"{reason} | AI Approved"
+
+    if trade_amt < Config.MIN_ORDER_IDR:
+        logger.warning(f"Modal terlalu kecil: {Config.BASE_CURRENCY} {trade_amt:,.2f} < min {Config.BASE_CURRENCY} {Config.MIN_ORDER_IDR:,.2f}")
         return False
 
     try:
         balance   = get_balance(exchange)
-        available = balance["idr"]["free"]
+        available = balance["quote"]["free"]
     except Exception as e:
         logger.error(f"Gagal mengambil saldo: {e}")
         notifier.notify_error(f"Gagal mengambil saldo Tokocrypto (Kemungkinan API key di-blok/expired):\n{e}")
         return False
 
-    if available < trade_idr:
-        logger.warning(f"IDR tidak cukup: Rp {available:,.0f} < Rp {trade_idr:,.0f}")
-        notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.0f}")
+    if available < trade_amt:
+        logger.warning(f"{Config.BASE_CURRENCY} tidak cukup: {available:,.2f} < {trade_amt:,.2f}")
+        notifier.notify_error(f"Saldo {Config.BASE_CURRENCY} tidak cukup: {available:,.2f}")
         return False
 
-    logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.0f} | Alasan: {reason}")
-    result = place_order(exchange, symbol, "buy", amount_idr=trade_idr, price=price)
+    logger.info(f"BUY {symbol} | Skor: {score}/100 | {Config.BASE_CURRENCY} {price:,.2f} | Alasan: {reason}")
+    result = place_order(exchange, symbol, "buy", amount_idr=trade_amt, price=price)
 
     if result.get("error"):
         logger.error(f"Buy gagal {symbol}: {result['error']}")
         notifier.notify_error(f"Buy gagal: {symbol}\n{result['error']}")
         return False
 
-    filled_qty   = result.get("amount", trade_idr / price if price > 0 else 0)
+    filled_qty   = result.get("amount", trade_amt / price if price > 0 else 0)
     filled_price = result.get("price") or price
 
     risk.record_trade(symbol, "buy", filled_qty, filled_price, result.get("id"))
-    risk.open_position(symbol, filled_qty, filled_price, value_idr=trade_idr)
+    risk.open_position(symbol, filled_qty, filled_price, value_idr=trade_amt)
 
     logger.info(
         f"BELI BERHASIL: {symbol} | {filled_qty:.6f} crypto | "
-        f"Rp {filled_price:,.0f}/unit | Total: Rp {trade_idr:,.0f}"
+        f"{Config.BASE_CURRENCY} {filled_price:,.2f}/unit | Total: {Config.BASE_CURRENCY} {trade_amt:,.2f}"
     )
     status = risk.get_status()
     notifier.notify_trade(
@@ -338,10 +353,44 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     # Init
     try:
         exchange = create_exchange()
-        if not Config.DRY_RUN:
-            # Test koneksi & validitas API key ke Tokocrypto
-            get_balance(exchange)
-        risk     = RiskManager()
+        
+        # ── Deteksi Saldo & Alokasi Currency Dinamis ──
+        try:
+            active_currency, available_balance = check_and_allocate_funds(exchange)
+            if active_currency == "NONE":
+                logger.warning("Saldo tidak mencukupi untuk trading di IDR maupun USDT")
+                notifier.send_telegram("⚠️ <b>CuanBot Saldo Tidak Cukup</b>\nSaldo Anda kurang dari Rp 10.000 IDR dan kurang dari 10 USDT. Bot tidak dapat memulai transaksi. Silakan top up.")
+                return
+            Config.setup_currency(active_currency)
+        except Exception as e:
+            logger.warning(f"Gagal mendeteksi saldo secara dinamis ({e}). Fallback ke config default.")
+            Config.setup_currency(Config.BASE_CURRENCY)
+
+        risk = RiskManager()
+
+        # Reconcile state currency jika terdeteksi perubahan mata uang aktif
+        saved_currency = risk.state.get("currency", "IDR")
+        if saved_currency != Config.BASE_CURRENCY:
+            logger.info(f"Mata uang di state ({saved_currency}) berbeda dengan mata uang aktif ({Config.BASE_CURRENCY}). Melakukan konversi state...")
+            try:
+                rate = get_usdt_idr_rate()
+                if saved_currency == "IDR" and Config.BASE_CURRENCY == "USDT":
+                    # Konversi IDR -> USDT
+                    risk.state["daily_pnl"] = risk.state.get("daily_pnl", 0.0) / rate
+                    risk.state["total_pnl"] = risk.state.get("total_pnl", 0.0) / rate
+                    risk.state["compound_profit"] = risk.state.get("compound_profit", 0.0) / rate
+                elif saved_currency == "USDT" and Config.BASE_CURRENCY == "IDR":
+                    # Konversi USDT -> IDR
+                    risk.state["daily_pnl"] = risk.state.get("daily_pnl", 0.0) * rate
+                    risk.state["total_pnl"] = risk.state.get("total_pnl", 0.0) * rate
+                    risk.state["compound_profit"] = risk.state.get("compound_profit", 0.0) * rate
+                
+                risk.state["currency"] = Config.BASE_CURRENCY
+                risk.save_state()
+                logger.info(f"State berhasil dikonversi ke {Config.BASE_CURRENCY}.")
+            except Exception as e:
+                logger.error(f"Gagal mengonversi state: {e}")
+
     except Exception as e:
         logger.error(f"Init gagal: {e}")
         notifier.notify_error(f"Init gagal (Cek API Key / IP Whitelist / Tokocrypto down):\n{e}")

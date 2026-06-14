@@ -15,13 +15,13 @@ def main():
         exchange = create_exchange()
         bal = get_balance(exchange)
         
-        idr = bal["idr"]
+        quote_bal = bal.get("quote", bal.get("idr"))
         holdings = bal["holdings"]
         
         print("\n=== BALANCE SUMMARY ===")
-        print(f"IDR Free : Rp {idr['free']:,.2f}")
-        print(f"IDR Used : Rp {idr['used']:,.2f}")
-        print(f"IDR Total: Rp {idr['total']:,.2f}")
+        print(f"{Config.BASE_CURRENCY} Free : {quote_bal['free']:,.2f}")
+        print(f"{Config.BASE_CURRENCY} Used : {quote_bal['used']:,.2f}")
+        print(f"{Config.BASE_CURRENCY} Total: {quote_bal['total']:,.2f}")
         
         has_holdings = False
         if holdings:
@@ -62,7 +62,7 @@ def main():
                     print("  Est. Price: Unknown")
             
             if has_holdings:
-                grand_total = idr['total'] + total_holdings_value_idr
+                grand_total = quote_bal['total'] + total_holdings_value_idr
                 print("\n=== TOTAL PORTFOLIO VALUE ===")
                 print(f"Grand Total: Rp {grand_total:,.2f}")
         

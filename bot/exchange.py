@@ -8,6 +8,7 @@ import requests
 import time as _time
 from config import Config
 import logging
+from bot import notifier
 
 logger = logging.getLogger("cuanbot")
 
@@ -55,10 +56,91 @@ def create_exchange() -> ccxt.Exchange:
     })
 
 
-def get_idr_pairs(exchange=None) -> list:
-    pairs = [f"{s}/{Config.BASE_CURRENCY}" for s in Config.SCAN_COINS]
-    logger.info(f"Scan {len(pairs)} pasang IDR")
+def get_trade_pairs(exchange=None) -> list:
+    pairs = []
+    available_markets = None
+    if exchange is not None:
+        try:
+            exchange.load_markets()
+            available_markets = exchange.markets
+        except Exception as e:
+            logger.warning(f"Gagal memuat daftar market dari exchange: {e}")
+
+    for s in Config.SCAN_COINS:
+        pair = f"{s}/{Config.BASE_CURRENCY}"
+        if available_markets is not None:
+            if pair in available_markets:
+                pairs.append(pair)
+            else:
+                logger.warning(f"Pasang {pair} dilewati karena tidak tersedia di Tokocrypto.")
+        else:
+            pairs.append(pair)
+
+    logger.info(f"Scan {len(pairs)} pasang {Config.BASE_CURRENCY} dari {len(Config.SCAN_COINS)} di config")
     return pairs
+
+
+def check_and_allocate_funds(exchange) -> tuple[str, float]:
+    """
+    Memeriksa saldo IDR & USDT dan mengalokasikan mata uang aktif secara dinamis.
+    Melakukan konversi otomatis IDR -> USDT jika saldo IDR >= Rp 180.000 dan USDT < 10.
+    Returns:
+        (active_currency, available_balance)
+    """
+    try:
+        balance = exchange.fetch_balance()
+        idr_free = float(balance.get("IDR", {}).get("free", 0) or 0)
+        usdt_free = float(balance.get("USDT", {}).get("free", 0) or 0)
+        
+        logger.info(f"[Alloc Manager] Saldo: Rp {idr_free:,.0f} IDR | {usdt_free:.4f} USDT")
+        
+        # Batas konversi minimum (misal Rp 180.000)
+        CONVERSION_THRESHOLD_IDR = 180000.0
+        
+        if usdt_free >= 10.0:
+            logger.info("[Alloc Manager] Saldo USDT mencukupi (>= 10 USDT). Menggunakan mode USDT.")
+            return "USDT", usdt_free
+            
+        if idr_free >= CONVERSION_THRESHOLD_IDR:
+            logger.info(f"[Alloc Manager] Saldo IDR (Rp {idr_free:,.0f}) cukup untuk konversi. Memulai auto-conversion...")
+            # Sisa saldo disisakan sedikit untuk fee (misal Rp 5.000)
+            amount_to_convert = idr_free - 5000.0
+            
+            try:
+                logger.info(f"[Alloc Manager] Membeli USDT menggunakan Rp {amount_to_convert:,.0f} IDR di market USDT/IDR...")
+                order = exchange.create_order(
+                    "USDT/IDR", "MARKET", "buy",
+                    None, None,
+                    {"quoteOrderQty": amount_to_convert}
+                )
+                logger.info(f"[Alloc Manager] Konversi sukses! Order ID: {order.get('id')}")
+                
+                # Re-fetch balance
+                balance = exchange.fetch_balance()
+                usdt_free = float(balance.get("USDT", {}).get("free", 0) or 0)
+                idr_free = float(balance.get("IDR", {}).get("free", 0) or 0)
+                
+                notifier.send_telegram(
+                    f"🔄 <b>Auto-Allocation Manager</b>\n"
+                    f"Berhasil mengonversi Rp {amount_to_convert:,.0f} IDR menjadi USDT.\n"
+                    f"Saldo saat ini: {usdt_free:.4f} USDT | Rp {idr_free:,.0f} IDR.\n"
+                    f"Bot sekarang beralih ke mode trading <b>USDT</b>."
+                )
+                return "USDT", usdt_free
+            except Exception as e:
+                logger.error(f"[Alloc Manager] Gagal konversi IDR -> USDT: {e}")
+                notifier.notify_error(f"Gagal konversi otomatis IDR -> USDT: {e}")
+                # Fallback ke IDR mode if conversion failed
+                
+        if idr_free >= 10000.0:
+            logger.info("[Alloc Manager] Saldo USDT tidak cukup (< 10 USDT), saldo IDR mencukupi (>= Rp 10.000). Menggunakan mode IDR.")
+            return "IDR", idr_free
+            
+        return "NONE", 0.0
+    except Exception as e:
+        logger.error(f"[Alloc Manager] Error saat memeriksa/mengalokasikan saldo: {e}")
+        # Default fallback ke IDR jika fetch balance error, agar tidak memutus flow di tempat lain
+        return "IDR", 0.0
 
 
 def fetch_candles(exchange, symbol: str, timeframe: str = None, limit: int = None) -> list:
@@ -125,7 +207,7 @@ def fetch_ticker_price(exchange, symbol: str) -> float:
 
 
 def get_balance(exchange) -> dict:
-    """Ambil saldo IDR dan semua holdings crypto."""
+    """Ambil saldo quote currency (IDR/USDT) dan semua holdings crypto."""
     try:
         cur     = Config.BASE_CURRENCY
         balance = exchange.fetch_balance()
@@ -146,7 +228,7 @@ def get_balance(exchange) -> dict:
                     "used":  float(amounts.get("used", 0) or 0),
                     "total": total_amt,
                 }
-        return {"idr": {"free": free, "used": used, "total": total}, "holdings": holdings}
+        return {"quote": {"free": free, "used": used, "total": total}, "holdings": holdings}
     except Exception as e:
         logger.error(f"Balance error: {e}")
         raise e
