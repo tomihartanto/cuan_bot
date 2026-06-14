@@ -117,10 +117,11 @@ def notify_emergency_stop(consecutive: int, pause_hours: float):
     send_telegram(msg)
 
 
-def notify_startup():
+def notify_startup(num_pairs: int = None):
     mode     = "🧪 DRY RUN" if Config.DRY_RUN else "🔴 LIVE TRADING"
     trail    = f"ON ({Config.TRAILING_PERCENT}%, aktif di +{Config.TRAILING_ACTIVATION}%)"  if Config.TRAILING_STOP_ENABLED else "OFF"
     compound = "ON" if Config.AUTO_COMPOUND else "OFF"
+    scan_info = f"{num_pairs} pair IDR aktif" if num_pairs else f"{len(Config.SCAN_COINS)} coin di config"
 
     send_telegram(
         f"🤖 <b>CuanBot v4 — Siap Trading!</b>\n"
@@ -130,7 +131,7 @@ def notify_startup():
         f"Target   : TP {Config.TAKE_PROFIT_PERCENT}% | SL {Config.STOP_LOSS_PERCENT}%\n"
         f"Cooldown : {Config.COOLDOWN_MINUTES} menit\n"
         f"Max/hari : {Config.MAX_TRADES_PER_DAY} trades\n"
-        f"Scan     : {len(Config.SCAN_COINS)} coin | {', '.join(Config.TIMEFRAMES)}\n"
+        f"Scan     : {scan_info} | {', '.join(Config.TIMEFRAMES)}\n"
         f"━━━━━━━━━━━━━━━━\n"
         f"📈 Trailing: {trail}\n"
         f"🔄 Compound: {compound}\n"

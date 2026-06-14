@@ -404,7 +404,8 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
     # Startup notif (anti-spam: max 1x per jam)
     if risk.should_send_startup_notif():
-        notifier.notify_startup()
+        valid_pairs = len(get_trade_pairs(exchange))
+        notifier.notify_startup(num_pairs=valid_pairs)
 
     status = risk.get_status(available_balance)
     logger.info(

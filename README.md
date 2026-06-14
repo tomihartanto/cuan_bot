@@ -1,6 +1,6 @@
 # 🤖 CuanBot v4 - Smart Crypto Investment Manager
 
-Bot trading otomatis untuk Tokocrypto. Scan 25+ coin, analisa teknikal multi-timeframe (EMA + RSI + MACD + Bollinger), filter AI (Z.ai GLM-5.2), dan auto-trade — jalan 24/7 di GitHub Actions, gratis.
+Bot trading otomatis untuk Tokocrypto. Scan 21 pair IDR aktif (dari 32 di config, disaring dinamis), analisa teknikal multi-timeframe (EMA + RSI + MACD + Bollinger), filter AI (Z.ai GLM-5.2), dan auto-trade — jalan 24/7 di GitHub Actions, gratis.
 
 ## 🏗️ Arsitektur
 
@@ -11,7 +11,7 @@ PHASE 1 — Reconcile: sync state vs exchange balance
     ↓
 PHASE 2 — Exit: cek posisi terbuka → TP/SL/Trailing/Timeout
     ↓
-PHASE 3 — Scan: 25 coin, 3 timeframe (5m, 15m, 1h)
+PHASE 3 — Scan: 21 pair IDR aktif, 3 timeframe (5m, 15m, 1h)
     ↓
 PHASE 4 — Entry: beli coin terbaik kalau score ≥ 60
     ↓
