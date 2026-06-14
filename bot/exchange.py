@@ -144,7 +144,33 @@ def fetch_candles(exchange, symbol: str, timeframe: str = None, limit: int = Non
 
 
 def fetch_ticker_price(exchange, symbol: str) -> float:
-    """Ambil harga terkini via Binance public data mirror (USDT × rate IDR)."""
+    """
+    Ambil harga terkini: Tokocrypto order book depth (primary) → Binance mirror (fallback).
+    Pakai mid price (best bid + best ask) / 2 dari order book Tokocrypto = harga real.
+    """
+    # Primary: Tokocrypto order book depth (harga real Tokocrypto)
+    try:
+        tko_symbol = symbol.replace("/", "_")  # BTC/IDR → BTC_IDR
+        r = requests.get(
+            "https://www.tokocrypto.com/open/v1/market/depth",
+            params={"symbol": tko_symbol, "limit": 5},
+            headers={"X-MBX-APIKEY": Config.API_KEY},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("code") == 0:
+                depth = data.get("data", {})
+                bids = depth.get("bids", [])
+                asks = depth.get("asks", [])
+                if bids and asks:
+                    best_bid = float(bids[0][0])
+                    best_ask = float(asks[0][0])
+                    return (best_bid + best_ask) / 2
+    except Exception as e:
+        logger.warning(f"Tokocrypto depth error {symbol}: {e}")
+
+    # Fallback: Binance data mirror (USDT × rate IDR)
     try:
         base = symbol.split("/")[0]
         rate = get_usdt_idr_rate()
@@ -153,10 +179,11 @@ def fetch_ticker_price(exchange, symbol: str) -> float:
             params={"symbol": f"{base}USDT"}, timeout=10
         )
         if r.status_code == 200:
-            return float(r.json()["price"]) * rate
-        logger.warning(f"Ticker {symbol}: HTTP {r.status_code}")
+            price = float(r.json()["price"]) * rate
+            logger.info(f"Binance fallback untuk {symbol}: Rp {price:,.0f}")
+            return price
     except Exception as e:
-        logger.warning(f"Ticker error {symbol}: {e}")
+        logger.warning(f"Binance ticker fallback error {symbol}: {e}")
     return 0.0
 
 
