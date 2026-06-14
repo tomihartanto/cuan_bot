@@ -53,18 +53,20 @@ class Config:
     EMERGENCY_STOP_LOSSES = int(os.getenv("EMERGENCY_STOP_LOSSES", "3"))
     EMERGENCY_PAUSE_HOURS = float(os.getenv("EMERGENCY_PAUSE_HOURS", "2"))
 
-    # ── Coin List (Disaring dinamis oleh exchange.py berdasarkan pair IDR aktif di Tokocrypto) ───
+    # ── Coin List (21 pair IDR aktif di Tokocrypto — terverifikasi) ───
+    # Hanya coin yang punya pasangan /IDR. Coin USDT-only (NEAR, DOT, LINK,
+    # dll) sengaja DIHAPUS agar tidak error saat buy/sell/reconcile.
     SCAN_COINS = [
         # Tier 1: Sangat likuid
         "BTC", "ETH", "BNB", "XRP", "SOL",
         # Tier 2: Likuid & terjangkau
-        "ADA", "DOGE", "TKO", "WLD", "SHIB", "TRX", "NEAR",
+        "ADA", "DOGE", "TKO", "WLD",
         # Tier 3: Volatile & trendsetter
-        "AVAX", "ONDO", "TAO", "POL", "DOT", "LINK", "UNI", "ATOM",
+        "AVAX", "ONDO", "TAO", "POL",
         # Tier 4: Altcoin populer & aktif
-        "ARB", "HBAR", "RENDER", "LTC", "OP",
+        "ARB", "HBAR", "RENDER",
         # Tier 5: Meme & volatile (high risk)
-        "FLOKI", "SUI", "TON", "WIF", "DOGS", "PEPE", "SAND",
+        "FLOKI", "SUI", "TON", "WIF", "DOGS",
     ]
 
     # ── Technical Indicators ──────────────────────────────────────────
