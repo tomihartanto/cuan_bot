@@ -1,278 +1,350 @@
 """
-CuanBot v4 - Exchange Connection
-Fix: quoteOrderQty untuk market buy, validasi minimum order, price fetching yang reliable.
+CuanBot v4 - Exchange Connection (Full Tokocrypto API)
+No CCXT, no Binance dependency. Langsung Tokocrypto API.
 """
 
-import ccxt
-import requests
+import hashlib
+import hmac
 import time as _time
+import requests
 from config import Config
 import logging
-from bot import notifier
 
 logger = logging.getLogger("cuanbot")
 
-# Market data source: Binance public data mirror (TIDAK geo-block, unlike api.binance.com)
-BINANCE_DATA = "https://data-api.binance.vision"
+# ── Base URLs ──────────────────────────────────────────────────────
+BASE_URL   = "https://www.tokocrypto.com"
+MBX_URL    = "https://www.tokocrypto.site/api/v3"
+NEXTME_URL = "https://cloudme-toko.2meta.app/api/v1"
 
-_usdt_idr_rate = None
-
-
-def get_usdt_idr_rate() -> float:
-    """Ambil kurs USDT/IDR (cached per session)."""
-    global _usdt_idr_rate
-    if _usdt_idr_rate:
-        return _usdt_idr_rate
-    # Primary: Binance USDTIDR (via public data mirror, tidak geo-block)
-    try:
-        r = requests.get(
-            f"{BINANCE_DATA}/api/v3/ticker/price",
-            params={"symbol": "USDTIDR"}, timeout=10
-        )
-        if r.status_code == 200:
-            _usdt_idr_rate = float(r.json()["price"])
-            logger.info(f"USDT/IDR rate: {_usdt_idr_rate:,.0f}")
-            return _usdt_idr_rate
-    except Exception:
-        pass
-    # Fallback: BNB cross rate
-    try:
-        r1 = requests.get(f"{BINANCE_DATA}/api/v3/ticker/price", params={"symbol": "BNBIDR"}, timeout=10)
-        r2 = requests.get(f"{BINANCE_DATA}/api/v3/ticker/price", params={"symbol": "BNBUSDT"}, timeout=10)
-        if r1.status_code == 200 and r2.status_code == 200:
-            _usdt_idr_rate = float(r1.json()["price"]) / float(r2.json()["price"])
-            logger.info(f"USDT/IDR rate (via BNB cross): {_usdt_idr_rate:,.0f}")
-            return _usdt_idr_rate
-    except Exception:
-        pass
-    _usdt_idr_rate = 16500.0
-    logger.warning(f"Pakai kurs fallback: {_usdt_idr_rate}")
-    return _usdt_idr_rate
+# ── Cache ───────────────────────────────────────────────────────────
+_symbol_info  = {}  # "BTC/IDR" -> {type, base, quote, ...}
+_symbol_loaded = False
 
 
-def create_exchange() -> ccxt.Exchange:
-    return ccxt.tokocrypto({
-        "apiKey": Config.API_KEY,
-        "secret": Config.SECRET_KEY,
-        "enableRateLimit": True,
-        "options": {"defaultType": "spot"},
-    })
+# ── HMAC Helpers ────────────────────────────────────────────────────
+
+def _hmac_sha256(secret: str, data: str) -> str:
+    return hmac.new(
+        secret.encode("utf-8"), data.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
 
 
-def get_trade_pairs(exchange=None) -> list:
-    """
-    Return list pasangan IDR yang aktif & tersedia di Tokocrypto.
-    Safety: kalau load_markets gagal → return empty (tidak scan pair invalid).
-    """
-    pairs = []
-    if exchange is None:
-        logger.warning("Exchange tidak di-pass → tidak bisa verifikasi market, return empty.")
-        return pairs
+def _signed_get(endpoint: str, params: dict = None) -> dict:
+    if params is None:
+        params = {}
+    params["timestamp"]  = int(_time.time() * 1000)
+    params["recvWindow"] = 5000
+
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    signature = _hmac_sha256(Config.SECRET_KEY, query)
+
+    url = f"{BASE_URL}{endpoint}?{query}&signature={signature}"
+    headers = {"X-MBX-APIKEY": Config.API_KEY}
 
     try:
-        exchange.load_markets()
+        resp = requests.get(url, headers=headers, timeout=15)
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.error(f"API error GET {endpoint}: {data.get('msg', resp.text[:200])}")
+            return {}
+        return data.get("data", {})
     except Exception as e:
-        logger.error(f"Gagal memuat daftar market Tokocrypto: {e} — skip scan (safety)")
-        return pairs
+        logger.error(f"API request failed GET {endpoint}: {e}")
+        return {}
 
-    for s in Config.SCAN_COINS:
-        pair = f"{s}/{Config.BASE_CURRENCY}"
-        market = exchange.markets.get(pair)
-        if market and market.get("active", True):
-            pairs.append(pair)
-        else:
-            logger.warning(f"Pasang {pair} dilewati (tidak tersedia/aktif di Tokocrypto).")
 
-    logger.info(f"Scan {len(pairs)} pasang {Config.BASE_CURRENCY} aktif dari {len(Config.SCAN_COINS)} di config")
+def _signed_post(endpoint: str, params: dict) -> dict:
+    params["timestamp"]  = int(_time.time() * 1000)
+    params["recvWindow"] = 5000
+
+    body = "&".join(f"{k}={v}" for k, v in params.items())
+    signature = _hmac_sha256(Config.SECRET_KEY, body)
+
+    url = f"{BASE_URL}{endpoint}"
+    headers = {
+        "X-MBX-APIKEY": Config.API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+
+    try:
+        resp = requests.post(
+            f"{url}?signature={signature}", data=body, headers=headers, timeout=15
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.error(
+                f"API error POST {endpoint}: {data.get('msg') or data.get('message', resp.text[:200])}"
+            )
+            return {}
+        return data.get("data", {})
+    except Exception as e:
+        logger.error(f"API request failed POST {endpoint}: {e}")
+        return {}
+
+
+# ── Symbol Info ─────────────────────────────────────────────────────
+
+def _load_symbols():
+    global _symbol_info, _symbol_loaded
+    if _symbol_loaded:
+        return _symbol_info
+
+    try:
+        resp = requests.get(f"{BASE_URL}/open/v1/common/symbols", timeout=15)
+        data = resp.json()
+        if data.get("code") != 0:
+            logger.error(f"Gagal load symbols: {data.get('msg')}")
+            return {}
+    except Exception as e:
+        logger.error(f"Symbol load error: {e}")
+        return {}
+
+    symbols = data.get("data", {}).get("list", [])
+    for s in symbols:
+        if s.get("spotTradingEnable") != 1:
+            continue
+        pair   = f"{s['baseAsset']}/{s['quoteAsset']}"
+        info   = {
+            "type":  s.get("type", 3),
+            "base":  s["baseAsset"],
+            "quote": s["quoteAsset"],
+            "base_precision":  s.get("basePrecision", 8),
+            "quote_precision": s.get("quotePrecision", 8),
+            "active": True,
+        }
+        _symbol_info[pair] = info
+
+    _symbol_loaded = True
+    n = len([k for k in _symbol_info if "/" in k])
+    logger.info(f"Loaded {n} trading symbols dari Tokocrypto")
+    return _symbol_info
+
+
+def _get_symbol_type(symbol: str) -> int:
+    syms = _load_symbols()
+    info = syms.get(symbol)
+    return info["type"] if info else 3
+
+
+def _format_mbx(symbol: str) -> str:
+    """BTC/IDR -> BTCIDR (format MBX engine type 1)."""
+    return symbol.replace("/", "")
+
+
+def _format_nextme(symbol: str) -> str:
+    """BTC/IDR -> BTC_IDR (format NextMe engine)."""
+    return symbol.replace("/", "_")
+
+
+def _market_url_and_symbol(symbol: str):
+    """Return (base_url, formatted_symbol) based on symbol type."""
+    stype = _get_symbol_type(symbol)
+    if stype == 1:
+        return MBX_URL, _format_mbx(symbol)
+    return NEXTME_URL, _format_nextme(symbol)
+
+
+# ── Public Market Data ──────────────────────────────────────────────
+
+def get_trade_pairs() -> list:
+    """Return list pasangan IDR aktif di Tokocrypto."""
+    syms = _load_symbols()
+    pairs = [
+        name for name, info in syms.items()
+        if "/" in name and info["quote"] == Config.BASE_CURRENCY
+    ]
+    pairs.sort()
+    logger.info(f"Found {len(pairs)} active {Config.BASE_CURRENCY} pairs")
     return pairs
 
 
-def check_idr_balance(exchange) -> float:
-    """
-    Cek saldo IDR free di Tokocrypto.
-    Returns:
-        Saldo IDR free (0.0 kalau error).
-    """
+def fetch_candles(symbol: str, timeframe: str = None, limit: int = None) -> list:
+    """Ambil candle dari Tokocrypto API langsung (harga IDR asli)."""
+    tf  = timeframe or Config.TIMEFRAME
+    lim = limit or Config.CANDLE_LIMIT
+
+    base_url, sym_str = _market_url_and_symbol(symbol)
+    url = f"{base_url}/klines"
+    params = {"symbol": sym_str, "interval": tf, "limit": lim}
+
     try:
-        balance = exchange.fetch_balance()
-        idr_free = float(balance.get("IDR", {}).get("free", 0) or 0)
-        logger.info(f"[Balance] Saldo IDR free: Rp {idr_free:,.0f}")
-        return idr_free
-    except Exception as e:
-        logger.error(f"[Balance] Error cek saldo IDR: {e}")
-        return 0.0
-
-
-def fetch_candles(exchange, symbol: str, timeframe: str = None, limit: int = None) -> list:
-    """Ambil candle dari Binance (lebih stabil dari Tokocrypto untuk data historis)."""
-    try:
-        tf  = timeframe or Config.TIMEFRAME
-        lim = limit or Config.CANDLE_LIMIT
-        base = symbol.split("/")[0]
-        rate = get_usdt_idr_rate()
-
-        binance_sym = f"{base}USDT"
-        resp = requests.get(
-            f"{BINANCE_DATA}/api/v3/klines",
-            params={"symbol": binance_sym, "interval": tf, "limit": lim},
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and len(data) > 0:
-                return [
-                    {
-                        "timestamp": c[0],
-                        "open":      float(c[1]) * rate,
-                        "high":      float(c[2]) * rate,
-                        "low":       float(c[3]) * rate,
-                        "close":     float(c[4]) * rate,
-                        "volume":    float(c[5]),
-                    }
-                    for c in data
-                ]
-            logger.warning(f"Binance: 0 candles untuk {binance_sym}")
-        elif resp.status_code == 400:
-            # Symbol tidak ada di Binance (e.g. bukan USDT pair)
-            logger.debug(f"Symbol tidak ditemukan di Binance: {binance_sym}")
+        resp = requests.get(url, params=params, timeout=15)
+        raw  = resp.json()
+        if isinstance(raw, dict):
+            if raw.get("code") != 0:
+                logger.warning(f"Klines API error {symbol}: {raw.get('msg', '')}")
+                return []
+            candles = raw.get("data", [])
+        elif isinstance(raw, list):
+            candles = raw
         else:
-            logger.warning(f"Binance error {binance_sym}: {resp.status_code}")
-        return []
+            candles = []
+
+        if not candles or len(candles) == 0:
+            return []
+
+        return [
+            {
+                "timestamp": c[0],
+                "open":      float(c[1]),
+                "high":      float(c[2]),
+                "low":       float(c[3]),
+                "close":     float(c[4]),
+                "volume":    float(c[5]),
+            }
+            for c in candles
+        ]
     except Exception as e:
         logger.warning(f"Candle error {symbol}: {e}")
         return []
 
 
-def fetch_ticker_price(exchange, symbol: str) -> float:
+def fetch_ticker_price(symbol: str) -> float:
     """
-    Ambil harga terkini: Tokocrypto order book depth (primary) → Binance mirror (fallback).
-    Pakai mid price (best bid + best ask) / 2 dari order book Tokocrypto = harga real.
+    Ambil harga terkini: mid price dari order book Tokocrypto.
+    (best bid + best ask) / 2
     """
-    # Primary: Tokocrypto order book depth (harga real Tokocrypto)
+    sym_str = _format_nextme(symbol)
     try:
-        tko_symbol = symbol.replace("/", "_")  # BTC/IDR → BTC_IDR
-        r = requests.get(
-            "https://www.tokocrypto.com/open/v1/market/depth",
-            params={"symbol": tko_symbol, "limit": 5},
+        resp = requests.get(
+            f"{BASE_URL}/open/v1/market/depth",
+            params={"symbol": sym_str, "limit": 5},
             headers={"X-MBX-APIKEY": Config.API_KEY},
             timeout=10,
         )
-        if r.status_code == 200:
-            data = r.json()
+        if resp.status_code == 200:
+            data = resp.json()
             if data.get("code") == 0:
                 depth = data.get("data", {})
-                bids = depth.get("bids", [])
-                asks = depth.get("asks", [])
+                bids  = depth.get("bids", [])
+                asks  = depth.get("asks", [])
                 if bids and asks:
                     best_bid = float(bids[0][0])
                     best_ask = float(asks[0][0])
                     return (best_bid + best_ask) / 2
     except Exception as e:
-        logger.warning(f"Tokocrypto depth error {symbol}: {e}")
+        logger.warning(f"Depth error {symbol}: {e}")
 
-    # Fallback: Binance data mirror (USDT × rate IDR)
-    try:
-        base = symbol.split("/")[0]
-        rate = get_usdt_idr_rate()
-        r = requests.get(
-            f"{BINANCE_DATA}/api/v3/ticker/price",
-            params={"symbol": f"{base}USDT"}, timeout=10
-        )
-        if r.status_code == 200:
-            price = float(r.json()["price"]) * rate
-            logger.info(f"Binance fallback untuk {symbol}: Rp {price:,.0f}")
-            return price
-    except Exception as e:
-        logger.warning(f"Binance ticker fallback error {symbol}: {e}")
     return 0.0
 
 
-def get_balance(exchange) -> dict:
-    """Ambil saldo quote currency (IDR/USDT) dan semua holdings crypto."""
-    try:
-        cur     = Config.BASE_CURRENCY
-        balance = exchange.fetch_balance()
-        free    = float(balance.get(cur, {}).get("free", 0) or 0)
-        used    = float(balance.get(cur, {}).get("used", 0) or 0)
-        total   = float(balance.get(cur, {}).get("total", 0) or 0)
-
-        holdings = {}
-        for asset, amounts in balance.items():
-            if not isinstance(amounts, dict):
-                continue
-            if asset in ("info", "free", "used", "total", cur):
-                continue
-            total_amt = float(amounts.get("total", 0) or 0)
-            if total_amt > 0:
-                holdings[asset] = {
-                    "free":  float(amounts.get("free", 0) or 0),
-                    "used":  float(amounts.get("used", 0) or 0),
-                    "total": total_amt,
-                }
-        return {"quote": {"free": free, "used": used, "total": total}, "holdings": holdings}
-    except Exception as e:
-        logger.error(f"Balance error: {e}")
-        raise e
+def check_market_active(symbol: str) -> bool:
+    """Cek apakah pair aktif di Tokocrypto."""
+    syms = _load_symbols()
+    info = syms.get(symbol)
+    if not info:
+        return False
+    return info.get("active", True)
 
 
-def place_order(exchange, symbol: str, side: str, amount_idr: float = None,
+# ── Account ─────────────────────────────────────────────────────────
+
+def check_idr_balance() -> float:
+    """Cek saldo IDR free."""
+    data = _signed_get("/open/v1/account/spot")
+    if not data:
+        return 0.0
+
+    assets = data.get("accountAssets", [])
+    for a in assets:
+        if a.get("asset") == Config.BASE_CURRENCY:
+            free = float(a.get("free", 0))
+            logger.info(f"[Balance] Saldo IDR: Rp {free:,.0f}")
+            return free
+    return 0.0
+
+
+def get_balance() -> dict:
+    """Ambil saldo IDR dan semua holdings crypto."""
+    data = _signed_get("/open/v1/account/spot")
+    if not data:
+        return {"quote": {"free": 0, "used": 0, "total": 0}, "holdings": {}}
+
+    cur    = Config.BASE_CURRENCY
+    assets = data.get("accountAssets", [])
+
+    free = 0.0
+    used = 0.0
+    holdings = {}
+
+    for a in assets:
+        asset    = a.get("asset")
+        a_free   = float(a.get("free", 0) or 0)
+        a_locked = float(a.get("locked", 0) or 0)
+        a_total  = a_free + a_locked
+
+        if asset == cur:
+            free = a_free
+            used = a_locked
+        elif a_total > 0:
+            holdings[asset] = {
+                "free":  a_free,
+                "used":  a_locked,
+                "total": a_total,
+            }
+
+    return {
+        "quote": {"free": free, "used": used, "total": free + used},
+        "holdings": holdings,
+    }
+
+
+# ── Orders ──────────────────────────────────────────────────────────
+
+def place_order(symbol: str, side: str, amount_idr: float = None,
                 amount_base: float = None, price: float = None) -> dict:
     """
-    Eksekusi market order.
-    
-    Untuk BUY  → gunakan amount_idr (IDR) via quoteOrderQty agar tidak under-minimum
-    Untuk SELL → gunakan amount_base (jumlah crypto yang dipegang)
+    Eksekusi market order via Tokocrypto API.
+    BUY  -> quoteOrderQty (nominal IDR)
+    SELL -> quantity (jumlah crypto)
     """
-    try:
-        if Config.DRY_RUN:
-            qty = amount_base or (amount_idr / price if price and price > 0 else 0)
-            val = amount_idr or (amount_base * price if price else 0)
-            logger.info(f"[DRY RUN] {side.upper()} {symbol} | qty={qty:.6f} | nilai=Rp {val:,.0f}")
-            return {
-                "dry_run": True, "symbol": symbol, "side": side,
-                "amount": qty, "value_idr": val, "price": price, "status": "simulated",
-            }
+    if Config.DRY_RUN:
+        qty = amount_base or (amount_idr / price if price and price > 0 else 0)
+        val = amount_idr or (amount_base * price if price else 0)
+        logger.info(f"[DRY RUN] {side.upper()} {symbol} | qty={qty:.6f} | nilai=Rp {val:,.0f}")
+        return {
+            "dry_run": True, "symbol": symbol, "side": side,
+            "amount": qty, "value_idr": val, "price": price, "status": "simulated",
+        }
 
-        if side == "buy":
-            # ✅ FIX #1: Pakai quoteOrderQty → bot kasih IDR, exchange kasih crypto
-            if amount_idr is None or amount_idr < Config.MIN_ORDER_IDR:
-                return {"error": f"Amount IDR terlalu kecil: {amount_idr} < {Config.MIN_ORDER_IDR}"}
-            try:
-                # Cara 1: quoteOrderQty via params
-                order = exchange.create_order(
-                    symbol, "MARKET", "buy",
-                    None, None,
-                    {"quoteOrderQty": amount_idr}
-                )
-            except Exception:
-                # Cara 2: fallback ke base amount kalau exchange tidak support quoteOrderQty
-                if price and price > 0:
-                    base_qty = amount_idr / price
-                    order = exchange.create_market_buy_order(symbol, base_qty)
-                else:
-                    raise
-            filled_qty   = float(order.get("filled") or order.get("amount") or 0)
-            filled_price = float(order.get("average") or order.get("price") or price or 0)
-            logger.info(f"BUY ORDER OK: {symbol} | {filled_qty:.6f} | avg Rp {filled_price:,.0f} | ID: {order.get('id')}")
-            return {
-                "dry_run": False, "id": order.get("id"), "symbol": symbol, "side": "buy",
-                "amount": filled_qty, "value_idr": amount_idr,
-                "price": filled_price, "status": order.get("status"),
-            }
+    sym_str   = _format_nextme(symbol)
+    side_enum = 0 if side == "buy" else 1
 
-        else:  # sell
-            if amount_base is None or amount_base <= 0:
-                return {"error": f"Amount crypto tidak valid: {amount_base}"}
-            order = exchange.create_market_sell_order(symbol, amount_base)
-            filled_qty   = float(order.get("filled") or order.get("amount") or amount_base)
-            filled_price = float(order.get("average") or order.get("price") or price or 0)
-            logger.info(f"SELL ORDER OK: {symbol} | {filled_qty:.6f} | avg Rp {filled_price:,.0f} | ID: {order.get('id')}")
-            return {
-                "dry_run": False, "id": order.get("id"), "symbol": symbol, "side": "sell",
-                "amount": filled_qty, "value_idr": filled_qty * filled_price,
-                "price": filled_price, "status": order.get("status"),
-            }
+    params = {
+        "symbol": sym_str,
+        "side":   side_enum,
+        "type":   2,  # MARKET
+    }
 
-    except Exception as e:
-        logger.error(f"Order ERROR {side} {symbol}: {e}")
-        return {"error": str(e), "symbol": symbol, "side": side}
+    if side == "buy":
+        if amount_idr is None or amount_idr < Config.MIN_ORDER_IDR:
+            return {"error": f"Amount IDR terlalu kecil: {amount_idr} < {Config.MIN_ORDER_IDR}"}
+        params["quoteOrderQty"] = str(int(amount_idr))
+    else:
+        if amount_base is None or amount_base <= 0:
+            return {"error": f"Amount crypto tidak valid: {amount_base}"}
+        params["quantity"] = f"{amount_base:.8f}"
+
+    data = _signed_post("/open/v1/orders", params)
+    if not data:
+        return {"error": "Order gagal, response kosong"}
+
+    filled_qty   = float(data.get("executedQty", 0) or 0)
+    filled_price = float(data.get("executedPrice", 0) or price or 0)
+
+    logger.info(
+        f"{side.upper()} ORDER OK: {symbol} | {filled_qty:.6f} "
+        f"| avg Rp {filled_price:,.0f} | ID: {data.get('orderId')}"
+    )
+
+    return {
+        "dry_run":   False,
+        "id":        str(data.get("orderId", "")),
+        "symbol":    symbol,
+        "side":      side,
+        "amount":    filled_qty,
+        "value_idr": amount_idr or (filled_qty * filled_price),
+        "price":     filled_price,
+        "status":    "filled" if filled_qty > 0 else "new",
+    }

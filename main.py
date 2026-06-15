@@ -1,6 +1,6 @@
 """
 CuanBot v4 - Smart Crypto Investment Manager
-State machine bersih: reconcile → exit positions → entry baru.
+State machine bersih: reconcile -> exit positions -> entry baru.
 Scalping otomatis: EMA 9/21 + RSI + MACD + Bollinger.
 
 Modes:
@@ -26,16 +26,16 @@ import time
 from datetime import datetime, timezone
 from config import Config
 from bot.exchange import (
-    create_exchange, get_trade_pairs, fetch_candles,
+    get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
-    check_idr_balance,
+    check_idr_balance, check_market_active,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
 from bot import notifier
 from bot.ai import filter_buy_signal
 
-# ── Logging ───────────────────────────────────────────────────────────
+# -- Logging ---------------------------------------------------------
 log_dir = os.path.join(PROJECT_ROOT, "logs")
 os.makedirs(log_dir, exist_ok=True)
 logging.basicConfig(
@@ -52,19 +52,19 @@ logging.basicConfig(
 logger = logging.getLogger("cuanbot")
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
 # SCAN semua coin
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
 
-def scan_all_coins(exchange) -> list:
+def scan_all_coins() -> list:
     """Scan semua coin, return ranking dari skor tertinggi."""
-    pairs   = get_trade_pairs(exchange)
+    pairs   = get_trade_pairs()
     results = []
     scanned = 0
 
     for pair in pairs:
         try:
-            candles_5m = fetch_candles(exchange, pair, timeframe="5m")
+            candles_5m = fetch_candles(pair, timeframe="5m")
             if not candles_5m or len(candles_5m) < 30:
                 time.sleep(0.2)
                 continue
@@ -74,7 +74,7 @@ def scan_all_coins(exchange) -> list:
             if quick["score"] > 35:
                 candles_by_tf = {"5m": candles_5m}
                 for tf in ["15m", "1h"]:
-                    c = fetch_candles(exchange, pair, timeframe=tf)
+                    c = fetch_candles(pair, timeframe=tf)
                     if c and len(c) >= 30:
                         candles_by_tf[tf] = c
                     time.sleep(0.2)
@@ -101,11 +101,11 @@ def scan_all_coins(exchange) -> list:
     return results
 
 
-# ─────────────────────────────────────────────────────────────────────
-# EXIT — Cek & Eksekusi Jual Posisi Terbuka
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# EXIT -- Cek & Eksekusi Jual Posisi Terbuka
+# ------------------------------------------------------------
 
-def check_and_sell_positions(exchange, risk: RiskManager) -> bool:
+def check_and_sell_positions(risk: RiskManager) -> bool:
     """Cek semua posisi terbuka, jual kalau TP/SL/Trailing/Timeout terpenuhi."""
     positions = risk.state.get("positions", [])
     if not positions:
@@ -113,7 +113,7 @@ def check_and_sell_positions(exchange, risk: RiskManager) -> bool:
 
     current_prices = {}
     for pos in positions:
-        price = fetch_ticker_price(exchange, pos["symbol"])
+        price = fetch_ticker_price(pos["symbol"])
         if price > 0:
             current_prices[pos["symbol"]] = price
             pnl = ((price - pos["entry_price"]) / pos["entry_price"] * 100)
@@ -125,13 +125,13 @@ def check_and_sell_positions(exchange, risk: RiskManager) -> bool:
     sell_actions = risk.check_positions(current_prices)
     sold_any = False
     for action in sell_actions:
-        if _execute_sell(exchange, risk, action):
+        if _execute_sell(risk, action):
             sold_any = True
 
     return sold_any
 
 
-def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
+def _execute_sell(risk: RiskManager, action: dict) -> bool:
     """Eksekusi satu sell order."""
     symbol = action["symbol"]
     amount = action["amount"]
@@ -139,7 +139,7 @@ def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
     reason = action["reason"]
 
     logger.info(f"SELL {symbol}: {amount:.6f} @ Rp {price:,.0f} | {reason}")
-    result = place_order(exchange, symbol, "sell", amount_base=amount, price=price)
+    result = place_order(symbol, "sell", amount_base=amount, price=price)
 
     if result.get("error"):
         logger.error(f"Sell gagal {symbol}: {result['error']}")
@@ -160,11 +160,11 @@ def _execute_sell(exchange, risk: RiskManager, action: dict) -> bool:
     return True
 
 
-# ─────────────────────────────────────────────────────────────────────
-# ENTRY — Beli Coin Terbaik dari Scan
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# ENTRY -- Beli Coin Terbaik dari Scan
+# ------------------------------------------------------------
 
-def try_buy_best_coin(exchange, risk: RiskManager, rankings: list, available_balance: float) -> bool:
+def try_buy_best_coin(risk: RiskManager, rankings: list, available_balance: float) -> bool:
     """Beli coin dengan sinyal terkuat dari hasil scan."""
     can, reason = risk.can_trade(available_balance)
     if not can:
@@ -182,17 +182,16 @@ def try_buy_best_coin(exchange, risk: RiskManager, rankings: list, available_bal
         logger.info("Tidak ada sinyal BUY yang valid")
         return False
 
-    return _execute_buy(exchange, risk, buy_candidates[0], buy_candidates[0]["reason"])
+    return _execute_buy(risk, buy_candidates[0], buy_candidates[0]["reason"])
 
 
-def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = False) -> bool:
+def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = False) -> bool:
     """Eksekusi satu buy order."""
     symbol = coin["symbol"]
     price  = coin["price"]
     score  = coin.get("score", 0)
 
-    # ── AI Filter Check (Z.ai GLM-5.2) ──
-    # Dilewati untuk force-buy (manual override)
+    # -- AI Filter Check (Z.ai GLM-5.2) --
     if not bypass_ai:
         ai_ok, ai_reason = filter_buy_signal(symbol, coin)
         if not ai_ok:
@@ -211,11 +210,11 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str, bypass_ai
 
     # Ambil saldo riil untuk dynamic sizing
     try:
-        balance   = get_balance(exchange)
+        balance   = get_balance()
         available = balance["quote"]["free"]
     except Exception as e:
         logger.error(f"Gagal mengambil saldo: {e}")
-        notifier.notify_error(f"Gagal mengambil saldo Tokocrypto (Kemungkinan API key di-blok/expired):\n{e}")
+        notifier.notify_error(f"Gagal mengambil saldo Tokocrypto:\n{e}")
         return False
 
     # Dynamic position sizing: persentase dari saldo riil
@@ -229,19 +228,14 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str, bypass_ai
         notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
         return False
 
-    # Validasi pair IDR aktif di Tokocrypto (defense-in-depth sebelum order)
-    try:
-        exchange.load_markets()
-        market = exchange.markets.get(symbol)
-        if not market or not market.get("active", True):
-            logger.error(f"Pair {symbol} tidak tersedia/aktif di Tokocrypto! Skip buy.")
-            notifier.notify_error(f"Pair {symbol} tidak ada/aktif di Tokocrypto. Buy dibatalkan.")
-            return False
-    except Exception as e:
-        logger.warning(f"Tidak bisa verifikasi market {symbol}: {e} — lanjut percaya hasil scan")
+    # Validasi pair IDR aktif di Tokocrypto (defense-in-depth)
+    if not check_market_active(symbol):
+        logger.error(f"Pair {symbol} tidak tersedia/aktif di Tokocrypto! Skip buy.")
+        notifier.notify_error(f"Pair {symbol} tidak ada/aktif di Tokocrypto. Buy dibatalkan.")
+        return False
 
     logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.2f} | Modal: Rp {trade_amt:,.0f} (dari saldo Rp {available:,.0f}) | Alasan: {reason}")
-    result = place_order(exchange, symbol, "buy", amount_idr=trade_amt, price=price)
+    result = place_order(symbol, "buy", amount_idr=trade_amt, price=price)
 
     if result.get("error"):
         logger.error(f"Buy gagal {symbol}: {result['error']}")
@@ -267,16 +261,12 @@ def _execute_buy(exchange, risk: RiskManager, coin: dict, reason: str, bypass_ai
     return True
 
 
-# ─────────────────────────────────────────────────────────────────────
-# MANUAL COMMANDS — Force Buy / Force Sell
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# MANUAL COMMANDS -- Force Buy / Force Sell
+# ------------------------------------------------------------
 
-def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
-    """
-    MANUAL: Paksa beli coin tertentu dari GitHub Actions.
-    Bypass scoring tapi tetap cek balance dan posisi.
-    """
-    # Normalize: "DOGE" → "DOGE/IDR"
+def run_force_buy(risk: RiskManager, symbol_input: str):
+    """MANUAL: Paksa beli coin tertentu dari GitHub Actions."""
     sym = symbol_input.strip().upper()
     if "/" not in sym:
         sym = f"{sym}/{Config.BASE_CURRENCY}"
@@ -284,9 +274,8 @@ def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
     logger.info(f"[FORCE BUY] Request: {sym}")
     notifier.send_telegram(f"[FORCE BUY] Request masuk untuk <b>{sym}</b>...")
 
-    # Cek saldo & posisi dulu
     try:
-        bal = get_balance(exchange)
+        bal = get_balance()
         available_balance = bal["quote"]["free"]
     except Exception as e:
         notifier.notify_error(f"Force buy gagal ambil saldo: {e}")
@@ -300,9 +289,9 @@ def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
         return
 
     # Ambil harga terkini
-    price = fetch_ticker_price(exchange, sym)
+    price = fetch_ticker_price(sym)
     if price <= 0:
-        candles = fetch_candles(exchange, sym, timeframe="5m")
+        candles = fetch_candles(sym, timeframe="5m")
         if candles:
             price = candles[-1]["close"]
 
@@ -310,10 +299,10 @@ def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
         notifier.notify_error(f"Force buy gagal: tidak bisa dapat harga untuk {sym}")
         return
 
-    # Ambil score untuk info (tidak sebagai filter)
+    # Ambil score untuk info
     score = 0
     try:
-        candles = fetch_candles(exchange, sym, timeframe="5m")
+        candles = fetch_candles(sym, timeframe="5m")
         if candles and len(candles) >= 30:
             result_score = score_coin(candles)
             score = result_score["score"]
@@ -321,13 +310,11 @@ def run_force_buy(exchange, risk: RiskManager, symbol_input: str):
         pass
 
     coin = {"symbol": sym, "price": price, "score": score, "falling_knife": False}
-    _execute_buy(exchange, risk, coin, f"Manual force buy dari GitHub | Score: {score}/100", bypass_ai=True)
+    _execute_buy(risk, coin, f"Manual force buy dari GitHub | Score: {score}/100", bypass_ai=True)
 
 
-def run_force_sell(exchange, risk: RiskManager):
-    """
-    MANUAL: Jual semua posisi terbuka sekarang juga dari GitHub Actions.
-    """
+def run_force_sell(risk: RiskManager):
+    """MANUAL: Jual semua posisi terbuka sekarang juga."""
     positions = risk.state.get("positions", [])
     if not positions:
         msg = "Tidak ada posisi terbuka untuk dijual."
@@ -341,7 +328,7 @@ def run_force_sell(exchange, risk: RiskManager):
     for pos in positions[:]:
         symbol = pos["symbol"]
         amount = pos["amount"]
-        price  = fetch_ticker_price(exchange, symbol)
+        price  = fetch_ticker_price(symbol)
         if price <= 0:
             price = pos["entry_price"]
 
@@ -352,13 +339,13 @@ def run_force_sell(exchange, risk: RiskManager):
             "reason":   "Manual force sell dari GitHub",
             "priority": "HIGH",
         }
-        _execute_sell(exchange, risk, action)
+        _execute_sell(risk, action)
         time.sleep(1)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# MAIN RUN — Auto Trading
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
+# MAIN RUN -- Auto Trading
+# ------------------------------------------------------------
 
 def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sell=False):
     if dry_run_override is not None:
@@ -374,10 +361,8 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
     # Init
     try:
-        exchange = create_exchange()
-
-        # ── Cek Saldo IDR ──
-        available_balance = check_idr_balance(exchange)
+        # -- Cek Saldo IDR --
+        available_balance = check_idr_balance()
         if available_balance < Config.MIN_ORDER_IDR:
             logger.warning(
                 f"Saldo IDR tidak cukup: Rp {available_balance:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}"
@@ -391,7 +376,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
         risk = RiskManager()
 
-        # ── Snapshot saldo awal hari (untuk daily loss limit) ──
+        # -- Snapshot saldo awal hari --
         if risk.state.get("day_start_balance") is None:
             risk.state["day_start_balance"] = available_balance
             risk.save_state()
@@ -404,7 +389,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
     # Startup notif (anti-spam: max 1x per jam)
     if risk.should_send_startup_notif():
-        valid_pairs = len(get_trade_pairs(exchange))
+        valid_pairs = len(get_trade_pairs())
         notifier.notify_startup(num_pairs=valid_pairs)
 
     status = risk.get_status(available_balance)
@@ -416,28 +401,28 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         f"Realized PnL: Rp {status['realized_pnl']:,.0f}"
     )
 
-    # ── MANUAL: Force Sell ──────────────────────────────────────────
+    # -- MANUAL: Force Sell ------------------------------------------------
     if force_sell:
         logger.info("Mode: FORCE SELL semua posisi")
-        run_force_sell(exchange, risk)
+        run_force_sell(risk)
         risk.save_state()
         return
 
-    # ── MANUAL: Force Buy ───────────────────────────────────────────
+    # -- MANUAL: Force Buy -------------------------------------------------
     if force_buy_symbol:
         logger.info(f"Mode: FORCE BUY {force_buy_symbol}")
-        run_force_buy(exchange, risk, force_buy_symbol)
+        run_force_buy(risk, force_buy_symbol)
         risk.save_state()
         return
 
-    # ── PHASE 1: Reconcile state vs exchange balance ────────────────
+    # -- PHASE 1: Reconcile state vs exchange balance ----------------------
     if not Config.DRY_RUN and not scan_only:
         try:
-            balance        = get_balance(exchange)
+            balance        = get_balance()
             current_prices = {}
             for asset in balance["holdings"]:
                 pair  = f"{asset}/{Config.BASE_CURRENCY}"
-                price = fetch_ticker_price(exchange, pair)
+                price = fetch_ticker_price(pair)
                 if price > 0:
                     current_prices[pair] = price
             risk.reconcile_with_balance(balance["holdings"], current_prices)
@@ -445,19 +430,19 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
             logger.warning(f"Reconcile gagal (lanjut): {e}")
             notifier.notify_error(f"Reconcile saldo gagal (Koneksi bermasalah/API Key di-blok):\n{e}")
 
-    # ── PHASE 2: EXIT — Cek posisi terbuka ─────────────────────────
+    # -- PHASE 2: EXIT -- Cek posisi terbuka --------------------------------
     if not scan_only:
-        sold = check_and_sell_positions(exchange, risk)
+        sold = check_and_sell_positions(risk)
         if sold:
             risk.save_state()
 
-    # ── PHASE 3: SCAN ───────────────────────────────────────────────
-    rankings = scan_all_coins(exchange)
+    # -- PHASE 3: SCAN ------------------------------------------------------
+    rankings = scan_all_coins()
     if not rankings:
         logger.warning("Tidak ada coin yang bisa di-scan")
         notifier.notify_error(
             "Gagal melakukan scan coin (0 coin berhasil di-scan).\n"
-            "Kemungkinan koneksi internet terganggu, rate limit Binance API, atau IP GitHub Actions diblok."
+            "Kemungkinan koneksi internet terganggu, rate limit Tokocrypto API, atau IP GitHub Actions diblok."
         )
         risk.save_state()
         return
@@ -475,15 +460,15 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         logger.info("Scan-only selesai.")
         return
 
-    # ── PHASE 4: ENTRY — Beli kalau belum ada posisi ───────────────
+    # -- PHASE 4: ENTRY -- Beli kalau belum ada posisi ----------------------
     current_positions = len(risk.state.get("positions", []))
     max_positions     = Config.get_max_positions(available_balance)
     if current_positions < max_positions:
-        try_buy_best_coin(exchange, risk, rankings, available_balance)
+        try_buy_best_coin(risk, rankings, available_balance)
     else:
         logger.info(f"Posisi penuh ({current_positions}/{max_positions}), skip beli")
 
-    # ── PHASE 5: Save & Summary ─────────────────────────────────────
+    # -- PHASE 5: Save & Summary --------------------------------------------
     risk.save_state()
     final = risk.get_status(available_balance)
     notifier.notify_daily_summary(final)
@@ -494,9 +479,9 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     )
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
 # Entry Point
-# ─────────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------
 
 if __name__ == "__main__":
     dry_run          = None
@@ -516,12 +501,12 @@ if __name__ == "__main__":
             scan_only = True
         elif arg == "--force-sell":
             force_sell = True
-            dry_run = False  # Force sell selalu live
+            dry_run = False
         elif arg == "--force-buy":
             i += 1
             if i < len(args):
                 force_buy_symbol = args[i]
-                dry_run = False  # Force buy selalu live
+                dry_run = False
         i += 1
 
     run(
