@@ -23,7 +23,8 @@ function Write-Menu {
     Write-Host "  [2] Dry Run       - Simulasi trading (tidak ada uang nyata)" -ForegroundColor Yellow
     Write-Host "  [3] Live Trading  - Trading real otomatis tiap $INTERVAL_MINUTES menit" -ForegroundColor Red
     Write-Host "  [4] Install Deps  - Install/update requirements.txt" -ForegroundColor Gray
-    Write-Host "  [5] Keluar" -ForegroundColor Gray
+    Write-Host "  [5] Update Bot    - Pull kode terbaru dari GitHub" -ForegroundColor Cyan
+    Write-Host "  [6] Keluar" -ForegroundColor Gray
     Write-Host ""
 }
 
@@ -32,6 +33,21 @@ function Install-Deps {
     pip install -r "$BOT_DIR\requirements.txt"
     Write-Host "✅ Done!" -ForegroundColor Green
     Start-Sleep -Seconds 2
+}
+
+function Update-Bot {
+    Write-Host ""
+    Write-Host "🔄 Update CuanBot..." -ForegroundColor Cyan
+    Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
+    Set-Location $BOT_DIR
+    git fetch origin
+    git reset --hard origin/main
+    pip install -r "$BOT_DIR\requirements.txt" -q
+    Write-Host ""
+    Write-Host "✅ Bot sudah versi terbaru!" -ForegroundColor Green
+    Write-Host "⚠️  Restart script ini supaya perubahan aktif." -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Tekan Enter"
 }
 
 function Run-ScanOnly {
@@ -106,14 +122,15 @@ while ($true) {
     Write-Header
     Write-Menu
 
-    $choice = Read-Host "  Pilihan (1-5)"
+    $choice = Read-Host "  Pilihan (1-6)"
 
     switch ($choice) {
         "1" { Run-ScanOnly }
         "2" { Run-DryRun }
         "3" { Run-Live }
         "4" { Install-Deps }
-        "5" {
+        "5" { Update-Bot }
+        "6" {
             Write-Host ""
             Write-Host "👋 Sampai jumpa!" -ForegroundColor Cyan
             exit

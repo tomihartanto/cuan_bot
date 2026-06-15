@@ -24,7 +24,8 @@ show_menu() {
     echo "  [3] Live Trading  - Trading real (quick check 1mnt, full scan 3mnt)"
     echo "  [4] Stop Bot      - Hentikan bot yang sedang jalan"
     echo "  [5] Status Bot    - Cek apakah bot sedang jalan"
-    echo "  [6] Keluar"
+    echo "  [6] Update Bot    - Pull kode terbaru dari GitHub"
+    echo "  [7] Keluar"
     echo ""
 }
 
@@ -120,11 +121,26 @@ status_bot() {
     read
 }
 
+update_bot() {
+    echo ""
+    echo "🔄 Update CuanBot..."
+    echo "─────────────────────────────────────────"
+    cd "$BOT_DIR"
+    git fetch origin && git reset --hard origin/main
+    pip install -r requirements.txt -q
+    echo ""
+    echo "✅ Bot sudah versi terbaru!"
+    echo "⚠️  Kalau bot sedang jalan, stop dulu lalu jalankan ulang."
+    echo ""
+    echo "Tekan Enter..."
+    read
+}
+
 # ── Main ──────────────────────────────────────────────────
 while true; do
     show_header
     show_menu
-    read -p "  Pilihan (1-6): " choice
+    read -p "  Pilihan (1-7): " choice
 
     case $choice in
         1) run_scan ;;
@@ -132,7 +148,8 @@ while true; do
         3) run_live ;;
         4) stop_bot ;;
         5) status_bot ;;
-        6)
+        6) update_bot ;;
+        7)
             echo ""
             echo "👋 Sampai jumpa!"
             exit 0
