@@ -5,7 +5,7 @@
 # ============================================================
 
 $BOT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$INTERVAL_MINUTES = 3
+$INTERVAL_SECONDS = 60   # 1 menit per cycle (quick check tiap cycle, full scan tiap 3 cycle)
 
 function Write-Header {
     Clear-Host
@@ -21,7 +21,7 @@ function Write-Menu {
     Write-Host ""
     Write-Host "  [1] Scan Only     - Lihat sinyal coin (aman, tidak ada transaksi)" -ForegroundColor Green
     Write-Host "  [2] Dry Run       - Simulasi trading (tidak ada uang nyata)" -ForegroundColor Yellow
-    Write-Host "  [3] Live Trading  - Trading real otomatis tiap $INTERVAL_MINUTES menit" -ForegroundColor Red
+    Write-Host "  [3] Live Trading  - Trading real (quick 1mnt, full scan 3mnt)" -ForegroundColor Red
     Write-Host "  [4] Install Deps  - Install/update requirements.txt" -ForegroundColor Gray
     Write-Host "  [5] Update Bot    - Pull kode terbaru dari GitHub" -ForegroundColor Cyan
     Write-Host "  [6] Keluar" -ForegroundColor Gray
@@ -86,25 +86,33 @@ function Run-Live {
 
     Write-Host ""
     Write-Host "✅ Live trading dimulai. Tekan Ctrl+C untuk berhenti." -ForegroundColor Green
+    Write-Host "   • Quick check (TP/SL): tiap 1 menit" -ForegroundColor DarkGray
+    Write-Host "   • Full scan & entry  : tiap 3 menit" -ForegroundColor DarkGray
     Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
 
     $run_count = 0
     while ($true) {
         $run_count++
         $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $is_full_scan = ($run_count % 3) -eq 0
+
         Write-Host ""
-        Write-Host "[$timestamp] ▶ Run #$run_count" -ForegroundColor Cyan
+        Write-Host "[$timestamp] ▶ Run #$run_count $(if ($is_full_scan) { '(FULL SCAN)' } else { '(quick check)' })" -ForegroundColor Cyan
         Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
 
         Set-Location $BOT_DIR
-        python main.py --live
+        if ($is_full_scan) {
+            python main.py --live
+        } else {
+            python main.py --quick
+        }
 
-        $next_run = (Get-Date).AddMinutes($INTERVAL_MINUTES).ToString("HH:mm:ss")
+        $next_run = (Get-Date).AddSeconds($INTERVAL_SECONDS).ToString("HH:mm:ss")
         Write-Host ""
         Write-Host "⏳ Run #$run_count selesai. Run berikutnya pukul $next_run (Ctrl+C untuk stop)" -ForegroundColor DarkGray
         Write-Host "─────────────────────────────────────────" -ForegroundColor DarkGray
 
-        Start-Sleep -Seconds ($INTERVAL_MINUTES * 60)
+        Start-Sleep -Seconds $INTERVAL_SECONDS
     }
 }
 

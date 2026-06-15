@@ -46,7 +46,7 @@ class Config:
     TRAILING_ACTIVATION   = float(os.getenv("TRAILING_ACTIVATION", "0.8"))  # Aktif setelah profit 0.8%
 
     # ── Scoring ───────────────────────────────────────────────────────
-    MIN_SCORE_TO_BUY  = int(os.getenv("MIN_SCORE_TO_BUY", "60"))
+    MIN_SCORE_TO_BUY  = int(os.getenv("MIN_SCORE_TO_BUY", "55"))
     MIN_SCORE_TO_HOLD = int(os.getenv("MIN_SCORE_TO_HOLD", "38"))
 
     # ── Liquidity Filter ──────────────────────────────────────────────
