@@ -23,7 +23,7 @@ load_dotenv()
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from config import Config
 from bot.exchange import (
     get_trade_pairs, fetch_candles,
@@ -122,12 +122,15 @@ def check_and_sell_positions(risk: RiskManager) -> bool:
                 f"Now: Rp {price:,.0f} | PnL: {pnl:+.2f}%"
             )
 
+    # check_positions() update trailing high/stop in-place → selalu save
     sell_actions = risk.check_positions(current_prices)
     sold_any = False
     for action in sell_actions:
         if _execute_sell(risk, action):
             sold_any = True
 
+    # Selalu persist trailing stop updates walau tidak ada sell
+    risk.save_state()
     return sold_any
 
 
@@ -431,10 +434,9 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
             logger.warning(f"Reconcile gagal (lanjut): {e}")
 
     # -- PHASE 2: EXIT -- Cek posisi terbuka --------------------------------
+    sold = False
     if not scan_only:
         sold = check_and_sell_positions(risk)
-        if sold:
-            risk.save_state()
 
     # -- QUICK MODE: skip scan & entry, langsung selesai -------------------
     if quick_check:
@@ -467,17 +469,41 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         return
 
     # -- PHASE 4: ENTRY -- Beli kalau belum ada posisi ----------------------
+    bought = False
     current_positions = len(risk.state.get("positions", []))
     max_positions     = Config.get_max_positions(available_balance)
     if current_positions < max_positions:
-        try_buy_best_coin(risk, rankings, available_balance)
+        bought = try_buy_best_coin(risk, rankings, available_balance)
     else:
         logger.info(f"Posisi penuh ({current_positions}/{max_positions}), skip beli")
 
     # -- PHASE 5: Save & Summary --------------------------------------------
     risk.save_state()
     final = risk.get_status(available_balance)
-    notifier.notify_daily_summary(final)
+
+    # Throttle summary: kirim max 1x/jam, KECUALI ada trade baru di run ini
+    last_summary = risk.state.get("last_summary_time")
+    now_utc = datetime.now(timezone.utc)
+    summary_cooldown = True
+    if last_summary:
+        try:
+            last_dt = datetime.fromisoformat(str(last_summary))
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if now_utc - last_dt >= timedelta(hours=1):
+                summary_cooldown = False
+        except Exception:
+            summary_cooldown = False
+    else:
+        summary_cooldown = False
+
+    # Kirim summary kalau: (1) ada trade baru, atau (2) sudah > 1 jam
+    had_activity = sold or bought
+    if had_activity or not summary_cooldown:
+        notifier.notify_daily_summary(final)
+        risk.state["last_summary_time"] = now_utc.isoformat()
+        risk.save_state()
+
     logger.info(
         f"Selesai: {final['trades_today']} trades | "
         f"PnL: Rp {final['daily_pnl']:,.0f} | "

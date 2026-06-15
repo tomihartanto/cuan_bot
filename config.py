@@ -98,6 +98,7 @@ class Config:
         """
         Modal per posisi = working_capital / num_positions.
         Berbasis saldo riil, otomatis scale naik/turun.
+        Selalu sisakan buffer untuk fee (~0.3%) dan dust.
         """
         if not available_balance or available_balance <= 0:
             return cls.INITIAL_TRADE_AMOUNT
@@ -113,6 +114,18 @@ class Config:
         if per_trade < cls.MIN_ORDER_IDR and available_balance >= cls.MIN_ORDER_IDR:
             per_trade = cls.MIN_ORDER_IDR
 
-        # Buffer dust: saldo besar sisain 2%, saldo kecil boleh pakai full
-        max_per_trade = available_balance * 0.98 if available_balance >= 50000 else available_balance
-        return min(per_trade, max_per_trade)
+        # Buffer: sisakan minimal 2% untuk fee + dust
+        # Saldo besar (>= 50k): max 98% per trade
+        # Saldo kecil (< 50k): max 95% per trade (butuh buffer fee lebih besar secara proporsional)
+        if available_balance >= 50000:
+            max_per_trade = available_balance * 0.98
+        else:
+            max_per_trade = available_balance * 0.95
+
+        result = min(per_trade, max_per_trade)
+
+        # Kalau hasil akhir masih di bawah min order, return 0 (jangan paksa)
+        if result < cls.MIN_ORDER_IDR:
+            return 0.0
+
+        return result

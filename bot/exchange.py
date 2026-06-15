@@ -30,7 +30,7 @@ def _hmac_sha256(secret: str, data: str) -> str:
     ).hexdigest()
 
 
-def _signed_get(endpoint: str, params: dict = None) -> dict:
+def _signed_get(endpoint: str, params: dict = None, retries: int = 2) -> dict:
     if params is None:
         params = {}
     params["timestamp"]  = int(_time.time() * 1000)
@@ -42,19 +42,22 @@ def _signed_get(endpoint: str, params: dict = None) -> dict:
     url = f"{BASE_URL}{endpoint}?{query}&signature={signature}"
     headers = {"X-MBX-APIKEY": Config.API_KEY}
 
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        data = resp.json()
-        if data.get("code") != 0:
-            logger.error(f"API error GET {endpoint}: {data.get('msg', resp.text[:200])}")
-            return {}
-        return data.get("data", {})
-    except Exception as e:
-        logger.error(f"API request failed GET {endpoint}: {e}")
-        return {}
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.error(f"API error GET {endpoint}: {data.get('msg', resp.text[:200])}")
+                return {}
+            return data.get("data", {})
+        except Exception as e:
+            logger.error(f"API request failed GET {endpoint} (attempt {attempt+1}/{retries}): {e}")
+            if attempt < retries - 1:
+                _time.sleep(1)
+    return {}
 
 
-def _signed_post(endpoint: str, params: dict) -> dict:
+def _signed_post(endpoint: str, params: dict, retries: int = 2) -> dict:
     params["timestamp"]  = int(_time.time() * 1000)
     params["recvWindow"] = 5000
 
@@ -67,20 +70,23 @@ def _signed_post(endpoint: str, params: dict) -> dict:
         "Content-Type": "application/x-www-form-urlencoded",
     }
 
-    try:
-        resp = requests.post(
-            f"{url}?signature={signature}", data=body, headers=headers, timeout=15
-        )
-        data = resp.json()
-        if data.get("code") != 0:
-            logger.error(
-                f"API error POST {endpoint}: {data.get('msg') or data.get('message', resp.text[:200])}"
+    for attempt in range(retries):
+        try:
+            resp = requests.post(
+                f"{url}?signature={signature}", data=body, headers=headers, timeout=15
             )
-            return {}
-        return data.get("data", {})
-    except Exception as e:
-        logger.error(f"API request failed POST {endpoint}: {e}")
-        return {}
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.error(
+                    f"API error POST {endpoint}: {data.get('msg') or data.get('message', resp.text[:200])}"
+                )
+                return {}
+            return data.get("data", {})
+        except Exception as e:
+            logger.error(f"API request failed POST {endpoint} (attempt {attempt+1}/{retries}): {e}")
+            if attempt < retries - 1:
+                _time.sleep(1)
+    return {}
 
 
 # ── Symbol Info ─────────────────────────────────────────────────────
@@ -125,6 +131,13 @@ def _get_symbol_type(symbol: str) -> int:
     syms = _load_symbols()
     info = syms.get(symbol)
     return info["type"] if info else 3
+
+
+def _get_base_precision(symbol: str) -> int:
+    """Ambil base asset precision (jumlah desimal) untuk quantity formatting."""
+    syms = _load_symbols()
+    info = syms.get(symbol)
+    return info.get("base_precision", 8) if info else 8
 
 
 def _format_mbx(symbol: str) -> str:
@@ -257,28 +270,42 @@ def fetch_candles(symbol: str, timeframe: str = None, limit: int = None) -> list
 def fetch_ticker_price(symbol: str) -> float:
     """
     Ambil harga terkini: mid price dari order book Tokocrypto.
-    (best bid + best ask) / 2
+    (best bid + best ask) / 2. Fallback ke MBX klines last close.
     """
-    sym_str = _format_nextme(symbol)
+    # Gunakan format yang sesuai dengan symbol type
+    stype = _get_symbol_type(symbol)
+    sym_str = _format_nextme(symbol) if stype != 1 else _format_mbx(symbol)
+
+    for attempt in range(2):
+        try:
+            resp = requests.get(
+                f"{BASE_URL}/open/v1/market/depth",
+                params={"symbol": sym_str, "limit": 5},
+                headers={"X-MBX-APIKEY": Config.API_KEY},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("code") == 0:
+                    depth = data.get("data", {})
+                    bids  = depth.get("bids", [])
+                    asks  = depth.get("asks", [])
+                    if bids and asks:
+                        best_bid = float(bids[0][0])
+                        best_ask = float(asks[0][0])
+                        return (best_bid + best_ask) / 2
+        except Exception as e:
+            logger.warning(f"Depth error {symbol} (attempt {attempt+1}): {e}")
+            if attempt < 1:
+                _time.sleep(0.5)
+
+    # Fallback: pakai last close dari klines
     try:
-        resp = requests.get(
-            f"{BASE_URL}/open/v1/market/depth",
-            params={"symbol": sym_str, "limit": 5},
-            headers={"X-MBX-APIKEY": Config.API_KEY},
-            timeout=10,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("code") == 0:
-                depth = data.get("data", {})
-                bids  = depth.get("bids", [])
-                asks  = depth.get("asks", [])
-                if bids and asks:
-                    best_bid = float(bids[0][0])
-                    best_ask = float(asks[0][0])
-                    return (best_bid + best_ask) / 2
-    except Exception as e:
-        logger.warning(f"Depth error {symbol}: {e}")
+        candles = fetch_candles(symbol, timeframe="5m", limit=5)
+        if candles:
+            return float(candles[-1]["close"])
+    except Exception:
+        pass
 
     return 0.0
 
@@ -378,7 +405,9 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
     else:
         if amount_base is None or amount_base <= 0:
             return {"error": f"Amount crypto tidak valid: {amount_base}"}
-        params["quantity"] = f"{amount_base:.8f}"
+        # Gunakan precision dari symbol info (hindari order rejection karena stepSize)
+        precision = _get_base_precision(symbol)
+        params["quantity"] = f"{amount_base:.{precision}f}"
 
     data = _signed_post("/open/v1/orders", params)
     if not data:

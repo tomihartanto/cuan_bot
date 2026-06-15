@@ -37,8 +37,18 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     macd_bullish = sig_5m.get("macd", {}).get("bullish", "N/A")
     bb_pos = sig_5m.get("bb", {}).get("position", "N/A")
     ema_above = sig_5m.get("ema", {}).get("above", "N/A")
-    ema_gap = sig_5m.get("ema", {}).get("gap", 0.0)
+    ema_gap_raw = sig_5m.get("ema", {}).get("gap", 0.0)
     vol_ratio = sig_5m.get("volume", {}).get("ratio", "N/A")
+
+    # Safe formatting: pastikan numerik sebelum format
+    try:
+        ema_gap_str = f"{float(ema_gap_raw):+.2f}%"
+    except (ValueError, TypeError):
+        ema_gap_str = "N/A"
+    try:
+        vol_ratio_str = f"{float(vol_ratio):.2f}x"
+    except (ValueError, TypeError):
+        vol_ratio_str = "N/A"
 
     prompt = (
         f"Anda adalah pakar analisis kuantitatif crypto senior.\n"
@@ -50,8 +60,8 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
         f"- RSI (14): {rsi}\n"
         f"- MACD Hist: {macd_hist} (Bullish Cross: {macd_bullish})\n"
         f"- Bollinger Band Position: {bb_pos} (0 = lower band, 1 = upper band)\n"
-        f"- Posisi EMA 9/21: Di atas: {ema_above}, Selisih: {ema_gap:+.2f}%\n"
-        f"- Rasio Volume (vs MA 20): {vol_ratio}x\n"
+        f"- Posisi EMA 9/21: Di atas: {ema_above}, Selisih: {ema_gap_str}\n"
+        f"- Rasio Volume (vs MA 20): {vol_ratio_str}\n"
         f"- Alasan Teknis: {score_data.get('reason', 'N/A')}\n\n"
         f"Analisis tren momentum ini. Apakah perdagangan ini aman dan berpeluang tinggi menghasilkan cuan cepat?\n"
         f"Berikan jawaban singkat (maksimal 2 kalimat) dalam Bahasa Indonesia tentang keputusan Anda.\n"

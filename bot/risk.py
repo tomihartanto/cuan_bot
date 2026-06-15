@@ -37,6 +37,7 @@ class RiskManager:
             "last_startup_notif": None,
             "recent_results":     [],    # History win/loss untuk win-rate guard
             "day_start_balance":  None,  # Snapshot saldo awal hari (untuk daily loss limit)
+            "last_summary_time":  None,  # Throttle daily summary notification
         }
         try:
             if os.path.exists(self.state_file):
@@ -310,6 +311,7 @@ class RiskManager:
         """
         tracked_symbols = {p["symbol"] for p in self.state.get("positions", [])}
 
+        # Phase 1: Tambah posisi yang ada di exchange tapi tidak di state
         for asset, amounts in holdings.items():
             pair  = f"{asset}/{Config.BASE_CURRENCY}"
             total = amounts.get("total", 0)
@@ -317,26 +319,41 @@ class RiskManager:
                 continue
             if pair in tracked_symbols:
                 continue
-            # Ada di exchange tapi tidak di state -> tambahkan dengan harga saat ini
             price = current_prices.get(pair, 0)
             if price <= 0:
                 continue
             logger.warning(f"Posisi tidak tracked ditemukan: {pair} {total:.6f} @ Rp {price:,.0f} — menambahkan ke state")
             self.open_position(pair, total, price)
 
-        # Hapus posisi dari state yang sudah tidak ada di exchange
-        updated_positions = []
+        # Phase 2: Identifikasi posisi yang harus dihapus (collect dulu, jangan mutate saat iterasi)
+        symbols_to_close = []
+        symbols_to_keep  = set()
         for pos in self.state.get("positions", []):
-            asset  = pos["symbol"].split("/")[0]
+            asset   = pos["symbol"].split("/")[0]
             balance = holdings.get(asset, {}).get("total", 0)
             if balance <= pos["amount"] * 0.05:  # < 5% dari amount → anggap sudah terjual
-                logger.warning(f"Posisi {pos['symbol']} tidak ada di balance → hapus dari state")
-                # Hitung PnL dengan harga terakhir
-                price = current_prices.get(pos["symbol"], pos["entry_price"])
-                self.close_position(pos["symbol"], price)
+                symbols_to_close.append(pos["symbol"])
             else:
-                updated_positions.append(pos)
-        self.state["positions"] = updated_positions
+                symbols_to_keep.add(pos["symbol"])
+
+        # Phase 3: Close posisi yang sudah tidak ada di exchange (setelah iterasi selesai)
+        for symbol in symbols_to_close:
+            logger.warning(f"Posisi {symbol} tidak ada di balance → hapus dari state")
+            price = current_prices.get(symbol, 0)
+            # Fallback ke entry price kalau harga tidak tersedia
+            if price <= 0:
+                for pos in self.state.get("positions", []):
+                    if pos["symbol"] == symbol:
+                        price = pos["entry_price"]
+                        break
+            self.close_position(symbol, price)
+
+        # Phase 4: Bersihkan positions list — hanya keep yang masih valid
+        # (close_position sudah pop, tapi double-check untuk safety)
+        self.state["positions"] = [
+            p for p in self.state.get("positions", [])
+            if p["symbol"] in symbols_to_keep
+        ]
         self.save_state()
 
     # ── Status & Summary ──────────────────────────────────────────────
