@@ -21,7 +21,7 @@ show_menu() {
     echo ""
     echo "  [1] Scan Only     - Lihat sinyal coin (aman)"
     echo "  [2] Dry Run       - Simulasi trading"
-    echo "  [3] Live Trading  - Trading real (loop tiap 15 menit)"
+    echo "  [3] Live Trading  - Trading real (quick check 1mnt, full scan 5mnt)"
     echo "  [4] Stop Bot      - Hentikan bot yang sedang jalan"
     echo "  [5] Status Bot    - Cek apakah bot sedang jalan"
     echo "  [6] Keluar"
