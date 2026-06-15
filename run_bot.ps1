@@ -5,7 +5,7 @@
 # ============================================================
 
 $BOT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$INTERVAL_MINUTES = 5
+$INTERVAL_MINUTES = 3
 
 function Write-Header {
     Clear-Host

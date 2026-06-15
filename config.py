@@ -114,13 +114,18 @@ class Config:
         if per_trade < cls.MIN_ORDER_IDR and available_balance >= cls.MIN_ORDER_IDR:
             per_trade = cls.MIN_ORDER_IDR
 
-        # Buffer: sisakan minimal 2% untuk fee + dust
-        # Saldo besar (>= 50k): max 98% per trade
-        # Saldo kecil (< 50k): max 95% per trade (butuh buffer fee lebih besar secara proporsional)
-        if available_balance >= 50000:
+        # Buffer strategy berdasarkan besaran saldo:
+        # - Saldo besar (>= 100k): 2% buffer (fee kecil secara proporsional)
+        # - Saldo sedang (50k-100k): 3% buffer
+        # - Saldo kecil (< 50k): pakai WORKING_CAPITAL_PCT saja (sudah ada 15% buffer)
+        if available_balance >= 100000:
             max_per_trade = available_balance * 0.98
+        elif available_balance >= 50000:
+            max_per_trade = available_balance * 0.97
         else:
-            max_per_trade = available_balance * 0.95
+            # Saldo kecil: gunakan working capital penuh (85% sudah di-set via WORKING_CAPITAL_PCT)
+            # Kalau saldo sangat mepet MIN_ORDER, pakai hampir semua (sisakan Rp 500 untuk fee)
+            max_per_trade = max(working, available_balance - 500)
 
         result = min(per_trade, max_per_trade)
 

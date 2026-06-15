@@ -5,7 +5,7 @@
 # ============================================================
 
 BOT_DIR="$HOME/cuan_bot"
-INTERVAL=60  # 1 menit (quick check tiap cycle, full scan tiap 5 cycle)
+INTERVAL=60  # 1 menit (quick check tiap cycle, full scan tiap 3 cycle)
 
 show_header() {
     clear
@@ -21,7 +21,7 @@ show_menu() {
     echo ""
     echo "  [1] Scan Only     - Lihat sinyal coin (aman)"
     echo "  [2] Dry Run       - Simulasi trading"
-    echo "  [3] Live Trading  - Trading real (quick check 1mnt, full scan 5mnt)"
+    echo "  [3] Live Trading  - Trading real (quick check 1mnt, full scan 3mnt)"
     echo "  [4] Stop Bot      - Hentikan bot yang sedang jalan"
     echo "  [5] Status Bot    - Cek apakah bot sedang jalan"
     echo "  [6] Keluar"
@@ -77,9 +77,9 @@ run_live() {
     echo ""
     echo "✅ Menjalankan bot di background (tmux session: bot)..."
     echo "   • Quick check (TP/SL): tiap 1 menit"
-    echo "   • Full scan & entry  : tiap 5 menit"
+    echo "   • Full scan & entry  : tiap 3 menit"
     tmux new-session -d -s bot -x 200 -y 50
-    tmux send-keys -t bot "cd $BOT_DIR && CYCLE=0; while true; do CYCLE=\$((CYCLE + 1)); if [ \$((CYCLE % 5)) -eq 0 ]; then echo '=== FULL SCAN ==='; python main.py --live; else python main.py --quick; fi; sleep $INTERVAL; done" Enter
+    tmux send-keys -t bot "cd $BOT_DIR && CYCLE=0; while true; do CYCLE=\$((CYCLE + 1)); if [ \$((CYCLE % 3)) -eq 0 ]; then echo '=== FULL SCAN ==='; python main.py --live; else python main.py --quick; fi; sleep $INTERVAL; done" Enter
     echo ""
     echo "Bot jalan di background! Gunakan:"
     echo "  tmux attach -t bot   → lihat log bot"
