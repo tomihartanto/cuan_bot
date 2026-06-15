@@ -347,11 +347,13 @@ def run_force_sell(risk: RiskManager):
 # MAIN RUN -- Auto Trading
 # ------------------------------------------------------------
 
-def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sell=False):
+def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sell=False, quick_check=False):
     if dry_run_override is not None:
         Config.DRY_RUN = dry_run_override
 
     mode = "[DRY RUN]" if Config.DRY_RUN else "[LIVE]"
+    if quick_check:
+        mode += " [QUICK]"
     logger.info(
         f"CuanBot v4 {mode} | "
         f"TP: {Config.TAKE_PROFIT_PERCENT}% | SL: {Config.STOP_LOSS_PERCENT}% | "
@@ -387,8 +389,8 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         notifier.notify_error(f"Init gagal (Cek API Key / IP Whitelist / Tokocrypto down):\n{e}")
         return
 
-    # Startup notif (anti-spam: max 1x per jam)
-    if risk.should_send_startup_notif():
+    # Startup notif (skip di quick mode, anti-spam)
+    if not quick_check and risk.should_send_startup_notif():
         valid_pairs = len(get_trade_pairs())
         notifier.notify_startup(num_pairs=valid_pairs)
 
@@ -428,7 +430,6 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
             risk.reconcile_with_balance(balance["holdings"], current_prices)
         except Exception as e:
             logger.warning(f"Reconcile gagal (lanjut): {e}")
-            notifier.notify_error(f"Reconcile saldo gagal (Koneksi bermasalah/API Key di-blok):\n{e}")
 
     # -- PHASE 2: EXIT -- Cek posisi terbuka --------------------------------
     if not scan_only:
@@ -436,13 +437,19 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         if sold:
             risk.save_state()
 
+    # -- QUICK MODE: skip scan & entry, langsung selesai -------------------
+    if quick_check:
+        risk.save_state()
+        logger.info("Quick check selesai (skip scan & entry)")
+        return
+
     # -- PHASE 3: SCAN ------------------------------------------------------
     rankings = scan_all_coins()
     if not rankings:
         logger.warning("Tidak ada coin yang bisa di-scan")
         notifier.notify_error(
             "Gagal melakukan scan coin (0 coin berhasil di-scan).\n"
-            "Kemungkinan koneksi internet terganggu, rate limit Tokocrypto API, atau IP GitHub Actions diblok."
+            "Kemungkinan koneksi internet terganggu, rate limit Tokocrypto API, atau IP diblok."
         )
         risk.save_state()
         return
@@ -488,6 +495,7 @@ if __name__ == "__main__":
     scan_only        = False
     force_buy_symbol = None
     force_sell       = False
+    quick_check      = False
 
     args = sys.argv[1:]
     i = 0
@@ -499,6 +507,9 @@ if __name__ == "__main__":
             dry_run = False
         elif arg == "--scan-only":
             scan_only = True
+        elif arg == "--quick":
+            quick_check = True
+            dry_run = False
         elif arg == "--force-sell":
             force_sell = True
             dry_run = False
@@ -514,4 +525,5 @@ if __name__ == "__main__":
         scan_only=scan_only,
         force_buy_symbol=force_buy_symbol,
         force_sell=force_sell,
+        quick_check=quick_check,
     )

@@ -5,7 +5,7 @@
 # ============================================================
 
 BOT_DIR="$HOME/cuan_bot"
-INTERVAL=900  # 15 menit
+INTERVAL=60  # 1 menit (quick check tiap cycle, full scan tiap 5 cycle)
 
 show_header() {
     clear
@@ -76,8 +76,10 @@ run_live() {
 
     echo ""
     echo "✅ Menjalankan bot di background (tmux session: bot)..."
+    echo "   • Quick check (TP/SL): tiap 1 menit"
+    echo "   • Full scan & entry  : tiap 5 menit"
     tmux new-session -d -s bot -x 200 -y 50
-    tmux send-keys -t bot "cd $BOT_DIR && while true; do python main.py --live; echo 'Tunggu 15 menit...'; sleep $INTERVAL; done" Enter
+    tmux send-keys -t bot "cd $BOT_DIR && CYCLE=0; while true; do CYCLE=\$((CYCLE + 1)); if [ \$((CYCLE % 5)) -eq 0 ]; then echo '=== FULL SCAN ==='; python main.py --live; else python main.py --quick; fi; sleep $INTERVAL; done" Enter
     echo ""
     echo "Bot jalan di background! Gunakan:"
     echo "  tmux attach -t bot   → lihat log bot"

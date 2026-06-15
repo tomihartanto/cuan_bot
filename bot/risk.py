@@ -319,22 +319,19 @@ class RiskManager:
     def reconcile_with_balance(self, holdings: dict, current_prices: dict):
         """
         Sync state positions dengan exchange balance.
-        Kalau ada crypto di exchange tapi tidak di state → tambah ke state.
-        Kalau di state tapi tidak ada di exchange → hapus dari state.
+        Kalau ada crypto di exchange tapi tidak di state -> tambah ke state.
+        Kalau di state tapi tidak ada di exchange -> hapus dari state.
         """
         tracked_symbols = {p["symbol"] for p in self.state.get("positions", [])}
-        scan_coin_set   = {f"{c}/{Config.BASE_CURRENCY}" for c in Config.SCAN_COINS}
 
         for asset, amounts in holdings.items():
             pair  = f"{asset}/{Config.BASE_CURRENCY}"
             total = amounts.get("total", 0)
-            if pair not in scan_coin_set:
-                continue
             if total <= 0:
                 continue
             if pair in tracked_symbols:
                 continue
-            # Ada di exchange tapi tidak di state → tambahkan dengan harga saat ini
+            # Ada di exchange tapi tidak di state -> tambahkan dengan harga saat ini
             price = current_prices.get(pair, 0)
             if price <= 0:
                 continue

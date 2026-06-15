@@ -147,16 +147,70 @@ def _market_url_and_symbol(symbol: str):
 
 # ── Public Market Data ──────────────────────────────────────────────
 
-def get_trade_pairs() -> list:
-    """Return list pasangan IDR aktif di Tokocrypto."""
+_volume_cache = None
+_volume_cache_time = 0
+
+
+def get_24h_volume_map() -> dict:
+    """Return {pair_slash: quoteVolume_24h} untuk semua pair IDR. Cached 5 menit."""
+    global _volume_cache, _volume_cache_time
+    now = _time.time()
+    if _volume_cache is not None and (now - _volume_cache_time) < 300:
+        return _volume_cache
+
+    try:
+        resp = requests.get(f"{MBX_URL}/ticker/24hr", timeout=15)
+        data = resp.json()
+        if not isinstance(data, list):
+            return {}
+
+        volumes = {}
+        for item in data:
+            sym = item.get("symbol", "")
+            qv  = float(item.get("quoteVolume", 0) or 0)
+            volumes[sym] = qv
+
+        _volume_cache = volumes
+        _volume_cache_time = now
+        return volumes
+    except Exception as e:
+        logger.warning(f"24h ticker error: {e}")
+        return _volume_cache or {}
+
+
+def get_trade_pairs(min_volume: float = None) -> list:
+    """
+    Return list pasangan IDR aktif & likuid di Tokocrypto.
+    Filter otomatis by volume 24 jam (MIN_VOLUME_IDR).
+    """
     syms = _load_symbols()
-    pairs = [
+    all_pairs = sorted(
         name for name, info in syms.items()
         if "/" in name and info["quote"] == Config.BASE_CURRENCY
-    ]
-    pairs.sort()
-    logger.info(f"Found {len(pairs)} active {Config.BASE_CURRENCY} pairs")
-    return pairs
+    )
+
+    threshold = min_volume if min_volume is not None else Config.MIN_VOLUME_IDR
+    if not threshold or threshold <= 0:
+        logger.info(f"Scan semua {len(all_pairs)} pair {Config.BASE_CURRENCY} (no volume filter)")
+        return all_pairs
+
+    vol_map = get_24h_volume_map()
+    if not vol_map:
+        logger.warning("Volume map kosong — scan semua pair tanpa filter")
+        return all_pairs
+
+    filtered = []
+    for pair in all_pairs:
+        ticker_sym = pair.replace("/", "")  # BTC/IDR -> BTCIDR
+        vol = vol_map.get(ticker_sym, 0)
+        if vol >= threshold:
+            filtered.append(pair)
+
+    logger.info(
+        f"Scan {len(filtered)}/{len(all_pairs)} pair {Config.BASE_CURRENCY} "
+        f"(volume >= Rp {threshold:,.0f}/24h)"
+    )
+    return filtered
 
 
 def fetch_candles(symbol: str, timeframe: str = None, limit: int = None) -> list:

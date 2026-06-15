@@ -49,6 +49,11 @@ class Config:
     MIN_SCORE_TO_BUY  = int(os.getenv("MIN_SCORE_TO_BUY", "60"))
     MIN_SCORE_TO_HOLD = int(os.getenv("MIN_SCORE_TO_HOLD", "38"))
 
+    # ── Liquidity Filter ──────────────────────────────────────────────
+    # Hanya scan pair dengan volume 24 jam >= threshold (IDR).
+    # Pair illiquid di-skip karena spread-nya gede (auto rugi).
+    MIN_VOLUME_IDR = float(os.getenv("MIN_VOLUME_IDR", "50000000"))  # Rp 50 jt / 24 jam
+
     # ── Emergency Stop ────────────────────────────────────────────────
     EMERGENCY_STOP_LOSSES = int(os.getenv("EMERGENCY_STOP_LOSSES", "3"))
     EMERGENCY_PAUSE_HOURS = float(os.getenv("EMERGENCY_PAUSE_HOURS", "2"))
