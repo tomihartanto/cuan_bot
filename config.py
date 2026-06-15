@@ -58,22 +58,6 @@ class Config:
     EMERGENCY_STOP_LOSSES = int(os.getenv("EMERGENCY_STOP_LOSSES", "3"))
     EMERGENCY_PAUSE_HOURS = float(os.getenv("EMERGENCY_PAUSE_HOURS", "2"))
 
-    # ── Coin List (21 pair IDR aktif di Tokocrypto — terverifikasi) ───
-    # Hanya coin yang punya pasangan /IDR. Coin USDT-only (NEAR, DOT, LINK,
-    # dll) sengaja DIHAPUS agar tidak error saat buy/sell/reconcile.
-    SCAN_COINS = [
-        # Tier 1: Sangat likuid
-        "BTC", "ETH", "BNB", "XRP", "SOL",
-        # Tier 2: Likuid & terjangkau
-        "ADA", "DOGE", "TKO", "WLD",
-        # Tier 3: Volatile & trendsetter
-        "AVAX", "ONDO", "TAO", "POL",
-        # Tier 4: Altcoin populer & aktif
-        "ARB", "HBAR", "RENDER",
-        # Tier 5: Meme & volatile (high risk)
-        "FLOKI", "SUI", "TON", "WIF", "DOGS",
-    ]
-
     # ── Technical Indicators ──────────────────────────────────────────
     RSI_PERIOD      = 14
     BB_PERIOD       = 20
@@ -90,7 +74,6 @@ class Config:
     # ── Telegram ──────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
-    NOTIFY_TRADES = os.getenv("NOTIFY_TRADES", "true").lower() == "true"
     NOTIFY_SCAN   = os.getenv("NOTIFY_SCAN", "false").lower() == "true"
 
     # ── State File ────────────────────────────────────────────────────

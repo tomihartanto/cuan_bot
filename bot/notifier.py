@@ -105,23 +105,11 @@ def notify_error(error_msg: str):
     send_telegram(f"❌ <b>ERROR CuanBot</b>\n━━━━━━━━━━━━━━━━\n{error_msg}")
 
 
-def notify_emergency_stop(consecutive: int, pause_hours: float):
-    msg = (
-        f"🛑 <b>EMERGENCY STOP AKTIF</b>\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"Rugi berturut-turut: {consecutive}x\n"
-        f"Bot pause selama: {pause_hours} jam\n"
-        f"Semua posisi masih dipantau untuk stop loss.\n"
-        f"Trading akan otomatis resume setelah pause selesai."
-    )
-    send_telegram(msg)
-
-
 def notify_startup(num_pairs: int = None):
     mode     = "🧪 DRY RUN" if Config.DRY_RUN else "🔴 LIVE TRADING"
     trail    = f"ON ({Config.TRAILING_PERCENT}%, aktif di +{Config.TRAILING_ACTIVATION}%)"  if Config.TRAILING_STOP_ENABLED else "OFF"
     compound = "ON" if Config.AUTO_COMPOUND else "OFF"
-    scan_info = f"{num_pairs} pair IDR aktif" if num_pairs else f"{len(Config.SCAN_COINS)} coin di config"
+    scan_info = f"{num_pairs} pair IDR likuid" if num_pairs else "0 pair"
 
     send_telegram(
         f"🤖 <b>CuanBot v4 — Siap Trading!</b>\n"

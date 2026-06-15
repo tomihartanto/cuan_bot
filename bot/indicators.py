@@ -116,20 +116,6 @@ def calc_volume_trend(volumes: list, period: int = 20) -> dict:
             "ratio": float(ratio), "high_volume": ratio > 1.5, "trend_up": trend_up}
 
 
-def calc_price_change(closes: list) -> dict:
-    current = closes[-1]
-    changes = {}
-    for periods, label in [(1, "1c"), (4, "4c"), (12, "12c"), (24, "24c")]:
-        if len(closes) > periods:
-            past = closes[-(periods + 1)]
-            changes[label] = ((current - past) / past) * 100
-        else:
-            changes[label] = 0.0
-    return {"current": float(current), "changes": changes,
-            "trend_short": "up" if changes.get("4c", 0) > 0 else "down",
-            "trend_medium": "up" if changes.get("12c", 0) > 0 else "down"}
-
-
 def calc_ema_cross(closes: list, fast: int = 9, slow: int = 21) -> dict:
     """Hitung EMA crossover untuk sinyal momentum cepat (cocok scalping 5m)."""
     if len(closes) < slow + 2:

@@ -108,7 +108,6 @@ jobs:
           TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
           ZAI_API_KEY:           ${{ secrets.ZAI_API_KEY }}
           ZAI_API_URL:           ${{ secrets.ZAI_API_URL }}
-          NOTIFY_TRADES:  "true"
           NOTIFY_SCAN:    "false"
           DRY_RUN:        "false"
         run: |

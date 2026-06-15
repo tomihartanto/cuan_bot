@@ -46,7 +46,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
         f"Berikut adalah ringkasan indikator teknikal saat ini:\n"
         f"- Skor Akhir Indikator: {score_data.get('score', 0)}/100\n"
         f"- Sinyal Awal: {score_data.get('action', 'BUY')}\n"
-        f"- Rencana Perdagangan: Scalping (Target Profit: 1.8%, Stop Loss: 1.2%)\n"
+        f"- Rencana Perdagangan: Scalping (Target Profit: {Config.TAKE_PROFIT_PERCENT}%, Stop Loss: {Config.STOP_LOSS_PERCENT}%)\n"
         f"- RSI (14): {rsi}\n"
         f"- MACD Hist: {macd_hist} (Bullish Cross: {macd_bullish})\n"
         f"- Bollinger Band Position: {bb_pos} (0 = lower band, 1 = upper band)\n"

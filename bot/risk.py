@@ -6,6 +6,7 @@ Fix: MAX_OPEN_POSITIONS check, position reconciliation, timeout handling.
 import json
 import os
 import logging
+from datetime import datetime, timedelta, timezone
 from config import Config
 
 logger = logging.getLogger("cuanbot")
@@ -48,7 +49,6 @@ class RiskManager:
 
     def save_state(self):
         try:
-            from datetime import datetime, timezone
             self.state["last_run"] = datetime.now(timezone.utc).isoformat()
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, indent=2, default=str)
@@ -56,7 +56,6 @@ class RiskManager:
             logger.error(f"State save gagal: {e}")
 
     def _reset_daily_if_needed(self):
-        from datetime import datetime, timezone
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if self.state.get("last_reset") != today:
             logger.info("Reset harian: trades_today & daily_pnl direset")
@@ -73,7 +72,6 @@ class RiskManager:
         available_balance: saldo IDR riil untuk hitung max posisi dinamis.
         """
         self._reset_daily_if_needed()
-        from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
 
@@ -148,7 +146,6 @@ class RiskManager:
 
     def record_trade(self, symbol: str, side: str, amount: float, price: float, order_id=None):
         self._reset_daily_if_needed()
-        from datetime import datetime, timezone
         self.state["trades_today"].append({
             "time": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol, "side": side,
@@ -162,7 +159,6 @@ class RiskManager:
     # ── Position Management ───────────────────────────────────────────
 
     def open_position(self, symbol: str, amount: float, entry_price: float, value_idr: float = None):
-        from datetime import datetime, timezone
         position = {
             "symbol":             symbol,
             "amount":             amount,
@@ -183,7 +179,6 @@ class RiskManager:
         )
 
     def close_position(self, symbol: str, exit_price: float) -> dict:
-        from datetime import datetime, timezone
         for i, pos in enumerate(self.state["positions"]):
             if pos["symbol"] != symbol:
                 continue
@@ -216,16 +211,14 @@ class RiskManager:
                     )
 
             result = {
-                "symbol":         symbol,
-                "entry":          entry,
-                "exit":           exit_price,
-                "amount":         amount,
-                "pnl_pct":        round(pnl_pct, 2),
-                "pnl_idr":        round(pnl_idr, 2),
-                "highest":        pos.get("highest_price", entry),
-                "trailing_used":  pos.get("trailing_activated", False),
-                "compound_total": round(self.state.get("compound_profit", 0), 2),
-                "hold_time":      pos.get("entry_time"),
+                "symbol":        symbol,
+                "entry":         entry,
+                "exit":          exit_price,
+                "amount":        amount,
+                "pnl_pct":       round(pnl_pct, 2),
+                "pnl_idr":       round(pnl_idr, 2),
+                "highest":       pos.get("highest_price", entry),
+                "trailing_used": pos.get("trailing_activated", False),
             }
             self.state["positions"].pop(i)
             self.save_state()
@@ -238,7 +231,6 @@ class RiskManager:
         Cek semua posisi terbuka terhadap TP/SL/Trailing/Timeout.
         Return list aksi yang harus dieksekusi.
         """
-        from datetime import datetime, timedelta, timezone
         actions = []
         now = datetime.now(timezone.utc)
 
@@ -272,11 +264,9 @@ class RiskManager:
 
             # ── Check exits ────────────────────────────────────────
             reason = None
-            priority = "MEDIUM"
 
             if price <= pos["stop_loss"]:
-                reason   = f"Stop loss ({pnl:+.2f}%)"
-                priority = "HIGH"
+                reason = f"Stop loss ({pnl:+.2f}%)"
 
             elif price >= pos["take_profit"]:
                 reason = f"Take profit ({pnl:+.2f}%)"
@@ -297,20 +287,16 @@ class RiskManager:
                             entry_dt = entry_dt.replace(tzinfo=timezone.utc)
                         hold_hours = (now - entry_dt).total_seconds() / 3600
                         if hold_hours >= Config.POSITION_TIMEOUT_HOURS:
-                            reason   = f"Timeout {hold_hours:.1f} jam ({pnl:+.2f}%)"
-                            priority = "MEDIUM"
+                            reason = f"Timeout {hold_hours:.1f} jam ({pnl:+.2f}%)"
                     except Exception:
                         pass
 
             if reason:
                 actions.append({
-                    "action":   "SELL",
-                    "symbol":   symbol,
-                    "amount":   pos["amount"],
-                    "price":    price,
-                    "reason":   reason,
-                    "priority": priority,
-                    "pnl_pct":  round(pnl, 2),
+                    "symbol": symbol,
+                    "amount": pos["amount"],
+                    "price":  price,
+                    "reason": reason,
                 })
 
         self.save_state()
@@ -381,7 +367,6 @@ class RiskManager:
 
     def should_send_startup_notif(self) -> bool:
         """Hanya kirim startup notif kalau sudah > 1 jam dari notif terakhir."""
-        from datetime import datetime, timedelta, timezone
         last = self.state.get("last_startup_notif")
         now  = datetime.now(timezone.utc)
         if not last:

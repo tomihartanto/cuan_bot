@@ -4,7 +4,7 @@ Multi-timeframe + EMA crossover + Falling Knife Filter.
 Recalibrated untuk kondisi market normal (tidak hanya extreme oversold).
 """
 
-from bot.indicators import calc_rsi, calc_macd, calc_bollinger, calc_volume_trend, calc_price_change, calc_ema_cross
+from bot.indicators import calc_rsi, calc_macd, calc_bollinger, calc_volume_trend, calc_ema_cross
 from config import Config
 
 
@@ -53,8 +53,8 @@ def score_coin(candles: list) -> dict:
     macd  = calc_macd(closes, Config.MACD_FAST, Config.MACD_SLOW, Config.MACD_SIGNAL)
     bb    = calc_bollinger(closes, Config.BB_PERIOD, Config.BB_STD)
     vol   = calc_volume_trend(volumes, Config.VOLUME_MA_PERIOD)
-    price = calc_price_change(closes)
     ema   = calc_ema_cross(closes, fast=9, slow=21)
+    price = float(closes[-1])
 
     falling = _is_falling_knife(closes)
 
@@ -139,11 +139,10 @@ def score_coin(candles: list) -> dict:
             "bb":     {"position": round(bb["position"], 2), "score": bb_score},
             "ema":    {"above": ema["above"],                "score": ema_score, "cross": ema["bullish_cross"], "gap": ema["gap_pct"]},
             "volume": {"ratio": round(vol["ratio"], 2),      "score": vol_score},
-            "price_change": price["changes"],
         },
         "action": action,
         "reason": reason,
-        "price": price["current"],
+        "price": price,
         "falling_knife": falling,
     }
 
@@ -210,5 +209,4 @@ def score_coin_multi_tf(candles_by_tf: dict) -> dict:
         "reason": reason,
         "price": primary.get("price", 0),
         "falling_knife": any(s.get("falling_knife", False) for s in scores.values()),
-        "multi_tf": {tf: {"score": s["score"], "action": s["action"]} for tf, s in scores.items()},
     }

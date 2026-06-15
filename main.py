@@ -333,11 +333,10 @@ def run_force_sell(risk: RiskManager):
             price = pos["entry_price"]
 
         action = {
-            "symbol":   symbol,
-            "amount":   amount,
-            "price":    price,
-            "reason":   "Manual force sell dari GitHub",
-            "priority": "HIGH",
+            "symbol": symbol,
+            "amount": amount,
+            "price":  price,
+            "reason": "Manual force sell dari GitHub",
         }
         _execute_sell(risk, action)
         time.sleep(1)
