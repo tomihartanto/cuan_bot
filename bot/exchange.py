@@ -373,13 +373,63 @@ def get_balance() -> dict:
 
 # ── Orders ──────────────────────────────────────────────────────────
 
+def validate_min_notional(side: str, amount_idr: float = None,
+                          amount_base: float = None, price: float = None) -> tuple:
+    """
+    Validasi nominal minimum transaksi sebelum dikirim ke exchange.
+
+    Persyaratan minimum Tokocrypto (MIN_ORDER_IDR):
+      - BUY : amount_idr >= MIN_ORDER_IDR
+      - SELL: (amount_base * price) >= MIN_ORDER_IDR
+
+    Return: (is_valid: bool, error_msg: str)
+    """
+    min_idr = Config.MIN_ORDER_IDR
+
+    if side == "buy":
+        if amount_idr is None or amount_idr <= 0:
+            return False, (f"Nominal {side.upper()} tidak valid: Rp {amount_idr}. "
+                           f"Minimum {side.upper()} adalah Rp {min_idr:,.0f}.")
+        if amount_idr < min_idr:
+            return False, (f"Nominal {side.upper()} terlalu kecil: Rp {amount_idr:,.0f}. "
+                           f"Minimum {side.upper()} adalah Rp {min_idr:,.0f}.")
+        return True, ""
+
+    elif side == "sell":
+        if amount_base is None or amount_base <= 0:
+            return False, (f"Jumlah crypto {side.upper()} tidak valid: {amount_base}.")
+        # Untuk SELL, nilai IDR = jumlah crypto * harga
+        value_idr = amount_base * price if price and price > 0 else 0
+        if value_idr <= 0:
+            return False, (f"Tidak dapat menghitung nilai {side.upper()} (harga tidak tersedia). "
+                           f"Minimum {side.upper()} adalah Rp {min_idr:,.0f}.")
+        if value_idr < min_idr:
+            return False, (
+                f"Nominal {side.upper()} terlalu kecil: Rp {value_idr:,.0f} "
+                f"({amount_base:.8f} x Rp {price:,.0f}). "
+                f"Minimum {side.upper()} adalah Rp {min_idr:,.0f}."
+            )
+        return True, ""
+
+    return False, f"Side tidak dikenal: {side}"
+
+
 def place_order(symbol: str, side: str, amount_idr: float = None,
                 amount_base: float = None, price: float = None) -> dict:
     """
     Eksekusi market order via Tokocrypto API.
     BUY  -> quoteOrderQty (nominal IDR)
     SELL -> quantity (jumlah crypto)
+
+    Validasi nominal minimum (MIN_ORDER_IDR) diterapkan untuk kedua sisi.
     """
+    # ── Server-side validation: nominal minimum ─────────────────────
+    ok, err = validate_min_notional(side, amount_idr=amount_idr,
+                                    amount_base=amount_base, price=price)
+    if not ok:
+        logger.warning(f"[VALIDATION] {side.upper()} {symbol} ditolak: {err}")
+        return {"error": err}
+
     if Config.DRY_RUN:
         qty = amount_base or (amount_idr / price if price and price > 0 else 0)
         val = amount_idr or (amount_base * price if price else 0)
@@ -399,12 +449,8 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
     }
 
     if side == "buy":
-        if amount_idr is None or amount_idr < Config.MIN_ORDER_IDR:
-            return {"error": f"Amount IDR terlalu kecil: {amount_idr} < {Config.MIN_ORDER_IDR}"}
         params["quoteOrderQty"] = str(int(amount_idr))
     else:
-        if amount_base is None or amount_base <= 0:
-            return {"error": f"Amount crypto tidak valid: {amount_base}"}
         # Gunakan precision dari symbol info (hindari order rejection karena stepSize)
         precision = _get_base_precision(symbol)
         params["quantity"] = f"{amount_base:.{precision}f}"

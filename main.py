@@ -29,6 +29,7 @@ from bot.exchange import (
     get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
     check_idr_balance, check_market_active,
+    validate_min_notional,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
@@ -141,6 +142,21 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
     price  = action["price"]
     reason = action["reason"]
 
+    # ── Client-side pre-check: nominal minimum SELL ────────────────
+    ok, err = validate_min_notional("sell", amount_base=amount, price=price)
+    if not ok:
+        value_idr = amount * price if price > 0 else 0
+        logger.warning(
+            f"[PRE-CHECK] SELL {symbol} diblokir: {err} "
+            f"(qty={amount:.8f}, nilai=Rp {value_idr:,.0f}, min=Rp {Config.MIN_ORDER_IDR:,.0f})"
+        )
+        notifier.notify_min_notional(
+            side="sell", symbol=symbol,
+            value_idr=value_idr, min_idr=Config.MIN_ORDER_IDR,
+            extra=f"Alasan sell: {reason}"
+        )
+        return False
+
     logger.info(f"SELL {symbol}: {amount:.6f} @ Rp {price:,.0f} | {reason}")
     result = place_order(symbol, "sell", amount_base=amount, price=price)
 
@@ -223,7 +239,15 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
     # Dynamic position sizing: persentase dari saldo riil
     trade_amt = Config.get_trade_amount(available)
     if trade_amt < Config.MIN_ORDER_IDR:
-        logger.warning(f"Modal terlalu kecil: Rp {trade_amt:,.2f} < min Rp {Config.MIN_ORDER_IDR:,.2f} (saldo Rp {available:,.0f})")
+        logger.warning(
+            f"[PRE-CHECK] Modal terlalu kecil: Rp {trade_amt:,.2f} < min Rp {Config.MIN_ORDER_IDR:,.2f} "
+            f"(saldo Rp {available:,.0f})"
+        )
+        notifier.notify_min_notional(
+            side="buy", symbol=symbol,
+            value_idr=trade_amt, min_idr=Config.MIN_ORDER_IDR,
+            extra=f"Saldo tersedia: Rp {available:,.0f}"
+        )
         return False
 
     if available < trade_amt:

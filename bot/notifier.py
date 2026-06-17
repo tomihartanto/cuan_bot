@@ -105,6 +105,38 @@ def notify_error(error_msg: str):
     send_telegram(f"❌ <b>ERROR CuanBot</b>\n━━━━━━━━━━━━━━━━\n{error_msg}")
 
 
+def notify_min_notional(side: str, symbol: str, value_idr: float,
+                        min_idr: float, extra: str = None):
+    """
+    Notifikasi bahwa transaksi ditolak karena nominal di bawah minimum.
+
+    Memberi tahu user nilai nominal saat ini dan minimum yang dibutuhkan
+    untuk kedua jenis transaksi (BUY & SELL).
+    """
+    side_label = "PENJUALAN" if side == "sell" else "PEMBELIAN"
+    emoji_side = "🔴" if side == "sell" else "🟢"
+
+    msg = (
+        f"⚠️ {emoji_side} <b>{side_label} DIBLOKIR — NOMINAL MINIMUM</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"Coin   : {symbol}\n"
+        f"Nominal saat ini : <b>Rp {value_idr:,.0f}</b>\n"
+        f"Minimum {side_label} : <b>Rp {min_idr:,.0f}</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"ℹ️ Persyaratan nominal minimum Tokocrypto:\n"
+        f"   • Pembelian  : &gt;= Rp {min_idr:,.0f}\n"
+        f"   • Penjualan  : &gt;= Rp {min_idr:,.0f}\n"
+        f"     (jumlah crypto × harga)"
+    )
+    if extra:
+        msg += f"\n📋 {extra}"
+    msg += (
+        f"\n💡 Tips: Akumulasi crypto hingga nilainya mencapai minimum, "
+        f"atau tingkatkan modal pembelian."
+    )
+    send_telegram(msg)
+
+
 def notify_startup(num_pairs: int = None):
     mode     = "🧪 DRY RUN" if Config.DRY_RUN else "🔴 LIVE TRADING"
     trail    = f"ON ({Config.TRAILING_PERCENT}%, aktif di +{Config.TRAILING_ACTIVATION}%)"  if Config.TRAILING_STOP_ENABLED else "OFF"
