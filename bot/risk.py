@@ -92,6 +92,10 @@ class RiskManager:
                     else:
                         logger.info("Emergency stop selesai — bot aktif kembali")
                         self.state["consecutive_losses"] = 0
+                        # Reset recent_results juga agar win-rate guard tidak nge-blok
+                        # dengan data loss lama yang sudah tidak relevan
+                        self.state["recent_results"] = []
+                        self.save_state()
                 except Exception as e:
                     logger.warning(f"Emergency stop check error: {e}")
 
@@ -159,7 +163,13 @@ class RiskManager:
 
     # ── Position Management ───────────────────────────────────────────
 
-    def open_position(self, symbol: str, amount: float, entry_price: float, value_idr: float = None):
+    def open_position(self, symbol: str, amount: float, entry_price: float,
+                      value_idr: float = None, take_profit_pct: float = None):
+        """
+        Buka posisi baru. take_profit_pct opsional untuk TP adaptif
+        (mis. crypto hot pakai TP lebih tinggi dari baseline).
+        """
+        tp_pct = take_profit_pct if take_profit_pct and take_profit_pct > 0 else Config.TAKE_PROFIT_PERCENT
         position = {
             "symbol":             symbol,
             "amount":             amount,
@@ -167,7 +177,8 @@ class RiskManager:
             "value_idr":          value_idr or (amount * entry_price),
             "entry_time":         datetime.now(timezone.utc).isoformat(),
             "stop_loss":          entry_price * (1 - Config.STOP_LOSS_PERCENT / 100),
-            "take_profit":        entry_price * (1 + Config.TAKE_PROFIT_PERCENT / 100),
+            "take_profit":        entry_price * (1 + tp_pct / 100),
+            "take_profit_pct":    tp_pct,  # simpan untuk logging & notifikasi
             "highest_price":      entry_price,
             "trailing_stop":      entry_price * (1 - Config.TRAILING_PERCENT / 100),
             "trailing_activated": False,
@@ -176,7 +187,7 @@ class RiskManager:
         self.save_state()
         logger.info(
             f"Posisi dibuka: {symbol} | Entry: Rp {entry_price:,.2f} | "
-            f"SL: Rp {position['stop_loss']:,.2f} | TP: Rp {position['take_profit']:,.2f}"
+            f"SL: Rp {position['stop_loss']:,.2f} | TP: Rp {position['take_profit']:,.2f} ({tp_pct}%)"
         )
 
     def close_position(self, symbol: str, exit_price: float) -> dict:

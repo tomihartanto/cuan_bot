@@ -15,6 +15,10 @@ class Config:
     SECRET_KEY = os.getenv("TOKOCRYPTO_SECRET_KEY", "")
     ZAI_API_KEY = os.getenv("ZAI_API_KEY", "")
     ZAI_API_URL = os.getenv("ZAI_API_URL", "https://api.z.ai/api/paas/v4/")
+    # Model Z.ai yang valid (per April 2026): glm-5.1, glm-5-turbo, glm-5,
+    # glm-4.7, glm-4.7-flash, glm-4.7-flashx, glm-4.6, glm-4.5 series.
+    # glm-4.7-flash = murah & cepat untuk tugas simple (filter sinyal).
+    ZAI_MODEL = os.getenv("ZAI_MODEL", "glm-4.7-flash")
 
     # ── Mode ──────────────────────────────────────────────────────────
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
@@ -48,6 +52,26 @@ class Config:
     # ── Scoring ───────────────────────────────────────────────────────
     MIN_SCORE_TO_BUY  = int(os.getenv("MIN_SCORE_TO_BUY", "55"))
     MIN_SCORE_TO_HOLD = int(os.getenv("MIN_SCORE_TO_HOLD", "38"))
+
+    # ── AI Fallback Threshold ─────────────────────────────────────────
+    # Skor minimum agar sinyal BUY lolos tanpa konfirmasi AI
+    # (saat ZAI_API_KEY kosong ATAU API Z.ai error). Lebih aman daripada
+    # meloloskan semua sinyal saat AI tidak aktif.
+    AI_FALLBACK_MIN_SCORE = int(os.getenv("AI_FALLBACK_MIN_SCORE", "75"))
+
+    # ── Hot Listing Detection ─────────────────────────────────────────
+    # Deteksi crypto "hot" berdasarkan volume spike ekstrem.
+    # Pair dengan ratio volume (vs MA) >= threshold akan tetap discan
+    # walau volume 24h-nya di bawah MIN_VOLUME_IDR.
+    HOT_VOLUME_SPIKE_RATIO = float(os.getenv("HOT_VOLUME_SPIKE_RATIO", "5.0"))  # 5x avg = pump indikator
+    HOT_LISTING_VOLUME_MIN = float(os.getenv("HOT_LISTING_VOLUME_MIN", "5000000"))  # Rp 5jt (lebih longgar daripada MIN_VOLUME_IDR)
+
+    # ── Adaptive Take Profit ──────────────────────────────────────────
+    # TP akan dinaikkan otomatis kalau momentum kuat (EMA gap besar).
+    # Profil Moderat: baseline TP, max TP saat momentum sangat kuat.
+    TP_ADAPTIVE_ENABLED    = os.getenv("TP_ADAPTIVE_ENABLED", "true").lower() == "true"
+    TP_ADAPTIVE_MAX_PERCENT = float(os.getenv("TP_ADAPTIVE_MAX_PERCENT", "8.0"))  # Cap TP sampai 8% saat tren kuat
+    TP_ADAPTIVE_EMA_GAP_TRIGGER = float(os.getenv("TP_ADAPTIVE_EMA_GAP_TRIGGER", "1.0"))  # EMA gap >= 1% → naikkan TP
 
     # ── Liquidity Filter ──────────────────────────────────────────────
     # Hanya scan pair dengan volume 24 jam >= threshold (IDR).

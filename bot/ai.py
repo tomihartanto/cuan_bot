@@ -13,12 +13,20 @@ logger = logging.getLogger("cuanbot")
 def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     """
     Kirim data teknikal ke Z.ai GLM-5.2 untuk analisis tambahan.
-    
+
     Returns:
         (bool, str): (apakah disetujui BUY, alasan/penjelasan AI)
+
+    Fallback policy saat API error:
+        - Skor >= 75 (sangat kuat): lolos tanpa AI (konfirmasi indikator sudah meyakinkan)
+        - Skor < 75: BLOCK (lebih aman daripada meloloskan sinyal lemah tanpa filter AI)
     """
     if not Config.ZAI_API_KEY:
-        return True, "AI tidak aktif (ZAI_API_KEY kosong). Sinyal indikator diloloskan."
+        # AI tidak dikonfigurasi: terapkan threshold skoring sebagai pengganti filter AI
+        score = score_data.get("score", 0)
+        if score >= Config.AI_FALLBACK_MIN_SCORE:
+            return True, f"AI nonaktif (ZAI_API_KEY kosong). Skor {score}/100 >= {Config.AI_FALLBACK_MIN_SCORE} → lolos."
+        return False, f"AI nonaktif & skor {score}/100 < {Config.AI_FALLBACK_MIN_SCORE} → ditolak (filter ketat)."
 
     logger.info(f"Meminta analisis AI Z.ai (GLM-5.2) untuk {symbol}...")
 
@@ -78,7 +86,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
             "Content-Type": "application/json"
         }
         data = {
-            "model": "glm-5.2",
+            "model": Config.ZAI_MODEL,
             "messages": [
                 {"role": "user", "content": prompt}
             ],
@@ -101,5 +109,8 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     except Exception as e:
         err_msg = f"Gagal menghubungi API Z.ai (GLM-5.2): {e}"
         logger.warning(err_msg)
-        # Fallback ke True agar bot tidak mati jika API Z.ai down
-        return True, f"⚠️ Fallback (AI Error): {e}. Meloloskan sinyal teknikal."
+        # Fallback aman: hanya lolos kalau skor sangat kuat (>= AI_FALLBACK_MIN_SCORE)
+        score = score_data.get("score", 0)
+        if score >= Config.AI_FALLBACK_MIN_SCORE:
+            return True, f"⚠️ Fallback (AI Error): {e}. Skor {score}/100 >= {Config.AI_FALLBACK_MIN_SCORE} → lolos."
+        return False, f"⛔ Fallback (AI Error): {e}. Skor {score}/100 < {Config.AI_FALLBACK_MIN_SCORE} → BLOCK untuk keamanan."

@@ -8,23 +8,45 @@ from bot.indicators import calc_rsi, calc_macd, calc_bollinger, calc_volume_tren
 from config import Config
 
 
-def _is_falling_knife(closes: list) -> bool:
+def _calc_volatility_pct(closes: list, period: int = 20) -> float:
+    """Hitung volatilitas (BB width / middle) dalam %. Dipakai untuk adaptif filter."""
+    if len(closes) < period:
+        return 2.0  # default konservatif
+    bb = calc_bollinger(closes, period=period, std_dev=2.0)
+    if bb["middle"] > 0:
+        return ((bb["upper"] - bb["lower"]) / bb["middle"]) * 100
+    return 2.0
+
+
+def _is_falling_knife(closes: list, volatility_pct: float = None) -> bool:
     """
     Deteksi 'falling knife': harga turun tajam dalam candle terakhir.
     Jangan beli kalau sedang crash, tunggu stabilisasi.
+
+    Threshold ADAPTIF: dinaikkan berdasarkan volatilitas (BB width).
+    Crypto volatile baru listing tidak akan kena filter terlalu agresif.
+
+    - Volatilitas rendah (<= 2%): threshold -2% (ketat, mode scalping)
+    - Volatilitas tinggi (> 5%): threshold mengikuti volatilitas (longgar)
     """
     if len(closes) < 13:
         return False
+
+    # Adaptif threshold: lebih longgar kalau volatilitas tinggi
+    if volatility_pct is None:
+        volatility_pct = _calc_volatility_pct(closes)
+    # Threshold dasar -2%, +1% per 3% volatilitas di atas 2% (cap -8%)
+    adaptive_threshold = -min(8.0, 2.0 + max(0, volatility_pct - 2.0) / 3.0)
+
     # Cek penurunan harga dalam 12 candle terakhir
     past_12  = closes[-13]
     current  = closes[-1]
     drop_pct = ((current - past_12) / past_12) * 100
-    # Kalau turun > 2% dalam 12 candle (1 jam di 5m TF) → falling knife
-    if drop_pct < -2.0:
+    if drop_pct < adaptive_threshold:
         return True
     # Cek 3 candle terakhir: semua merah dan volume besar → momentum turun
     last_3_drops = [closes[-(i+1)] < closes[-(i+2)] for i in range(3)]
-    if all(last_3_drops) and drop_pct < -1.0:
+    if all(last_3_drops) and drop_pct < adaptive_threshold * 0.5:
         return True
     return False
 
@@ -56,7 +78,9 @@ def score_coin(candles: list) -> dict:
     ema   = calc_ema_cross(closes, fast=9, slow=21)
     price = float(closes[-1])
 
-    falling = _is_falling_knife(closes)
+    # Volatilitas untuk filter adaptif & TP adaptif
+    volatility_pct = _calc_volatility_pct(closes, Config.BB_PERIOD)
+    falling = _is_falling_knife(closes, volatility_pct=volatility_pct)
 
     # ── RSI Score (0-20) ─────────────────────────────────────────────
     # Oversold lebih baik tapi bukan extreme (extreme bisa lanjut turun)
@@ -99,12 +123,18 @@ def score_coin(candles: list) -> dict:
     elif not ema["above"]:                          ema_score =  5   # Weak downtrend
     else:                                           ema_score =  8   # Netral
 
-    # ── Volume Score (0-10) ───────────────────────────────────────────
-    # Volume sebagai konfirmasi, bukan sinyal utama
-    if   vol["high_volume"] and ema["above"]:       vol_score = 10   # Volume spike + uptrend
-    elif vol["high_volume"] and not ema["above"]:   vol_score =  3   # Volume spike tapi downtrend
-    elif vol["trend_up"]:                           vol_score =  7
-    else:                                           vol_score =  4
+    # ── Volume Score (0-15) — diperluas untuk deteksi pump ──────────
+    # Volume sebagai konfirmasi, dan BONUS besar untuk spike ekstrem (pump)
+    if vol["ratio"] >= Config.HOT_VOLUME_SPIKE_RATIO and ema["above"]:
+        vol_score = 15   # Pump-class spike + uptrend = sinyal hot kuat
+    elif vol["high_volume"] and ema["above"]:
+        vol_score = 10   # Volume spike + uptrend
+    elif vol["high_volume"] and not ema["above"]:
+        vol_score =  3   # Volume spike tapi downtrend
+    elif vol["trend_up"]:
+        vol_score =  7
+    else:
+        vol_score =  4
 
     total_score = rsi_score + macd_score + bb_score + ema_score + vol_score
 
@@ -129,6 +159,8 @@ def score_coin(candles: list) -> dict:
     if bb["below_lower"]:                 reasons.append("Below lower BB")
     elif bb["above_upper"]:              reasons.append("Above upper BB")
     if vol["high_volume"]:                reasons.append(f"Volume spike ({vol['ratio']:.1f}x)")
+    if vol["ratio"] >= Config.HOT_VOLUME_SPIKE_RATIO and ema["above"]:
+        reasons.append(f"🔥 HOT/PUMP ({vol['ratio']:.1f}x volume)")
     reason = " | ".join(reasons) if reasons else "Tidak ada sinyal kuat"
 
     return {
@@ -144,6 +176,9 @@ def score_coin(candles: list) -> dict:
         "reason": reason,
         "price": price,
         "falling_knife": falling,
+        "is_hot": vol["ratio"] >= Config.HOT_VOLUME_SPIKE_RATIO and ema["above"],
+        "ema_gap_pct": ema["gap_pct"],  # untuk TP adaptif di risk manager
+        "volatility_pct": round(volatility_pct, 2),  # untuk TP adaptif
     }
 
 

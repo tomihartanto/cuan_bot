@@ -20,6 +20,8 @@ NEXTME_URL = "https://cloudme-toko.2meta.app/api/v1"
 # ── Cache ───────────────────────────────────────────────────────────
 _symbol_info  = {}  # "BTC/IDR" -> {type, base, quote, ...}
 _symbol_loaded = False
+_symbol_loaded_time = 0  # timestamp saat terakhir load (untuk TTL)
+_SYMBOL_CACHE_TTL = 3600  # 1 jam — refresh agar crypto baru listing terdeteksi
 
 
 # ── HMAC Helpers ────────────────────────────────────────────────────
@@ -91,9 +93,11 @@ def _signed_post(endpoint: str, params: dict, retries: int = 2) -> dict:
 
 # ── Symbol Info ─────────────────────────────────────────────────────
 
-def _load_symbols():
-    global _symbol_info, _symbol_loaded
-    if _symbol_loaded:
+def _load_symbols(force: bool = False):
+    """Load daftar symbol dari Tokocrypto. Otomatis refresh tiap 1 jam (TTL)."""
+    global _symbol_info, _symbol_loaded, _symbol_loaded_time
+    now = _time.time()
+    if _symbol_loaded and not force and (now - _symbol_loaded_time) < _SYMBOL_CACHE_TTL:
         return _symbol_info
 
     try:
@@ -122,8 +126,9 @@ def _load_symbols():
         _symbol_info[pair] = info
 
     _symbol_loaded = True
+    _symbol_loaded_time = _time.time()
     n = len([k for k in _symbol_info if "/" in k])
-    logger.info(f"Loaded {n} trading symbols dari Tokocrypto")
+    logger.info(f"Loaded {n} trading symbols dari Tokocrypto (cache TTL {_SYMBOL_CACHE_TTL}s)")
     return _symbol_info
 
 
@@ -195,6 +200,10 @@ def get_trade_pairs(min_volume: float = None) -> list:
     """
     Return list pasangan IDR aktif & likuid di Tokocrypto.
     Filter otomatis by volume 24 jam (MIN_VOLUME_IDR).
+
+    Exception: pair dengan volume spike ekstrem (indikasi hot/pump) tetap
+    dimasukkan walau volume 24h-nya di bawah MIN_VOLUME_IDR, asal masih di
+    atas HOT_LISTING_VOLUME_MIN. Memungkinkan bot menangkap crypto hot baru.
     """
     syms = _load_symbols()
     all_pairs = sorted(
@@ -212,18 +221,87 @@ def get_trade_pairs(min_volume: float = None) -> list:
         logger.warning("Volume map kosong — scan semua pair tanpa filter")
         return all_pairs
 
+    # Ambil 24h quote volume + harga untuk hitung spike ratio
+    ticker_stats = _get_24h_ticker_stats()
+
     filtered = []
+    hot_candidates = []
     for pair in all_pairs:
         ticker_sym = pair.replace("/", "")  # BTC/IDR -> BTCIDR
         vol = vol_map.get(ticker_sym, 0)
         if vol >= threshold:
             filtered.append(pair)
+            continue
 
+        # Cek apakah ini kandidat "hot" (volume spike ekstrem)
+        stats = ticker_stats.get(ticker_sym)
+        if stats and vol >= Config.HOT_LISTING_VOLUME_MIN:
+            spike_ratio = stats.get("volume_spike_ratio", 1.0)
+            price_change_pct = abs(stats.get("price_change_pct", 0))
+            # Hot = volume spike >= 5x DAN pergerakan harga signifikan
+            if spike_ratio >= Config.HOT_VOLUME_SPIKE_RATIO and price_change_pct >= 3.0:
+                hot_candidates.append(pair)
+
+    all_scan = filtered + hot_candidates
     logger.info(
-        f"Scan {len(filtered)}/{len(all_pairs)} pair {Config.BASE_CURRENCY} "
-        f"(volume >= Rp {threshold:,.0f}/24h)"
+        f"Scan {len(all_scan)}/{len(all_pairs)} pair {Config.BASE_CURRENCY} "
+        f"(likuid: {len(filtered)}, hot: {len(hot_candidates)})"
     )
-    return filtered
+    return all_scan
+
+
+# ── 24h Ticker Stats (untuk deteksi pump) ──────────────────────────
+
+_ticker_stats_cache = None
+_ticker_stats_time = 0
+
+
+def _get_24h_ticker_stats() -> dict:
+    """
+    Ambil statistik 24h ticker (volume spike ratio + price change %).
+    Cached 5 menit. Dipakai untuk deteksi pump/hot listing.
+    """
+    global _ticker_stats_cache, _ticker_stats_time
+    now = _time.time()
+    if _ticker_stats_cache is not None and (now - _ticker_stats_time) < 300:
+        return _ticker_stats_cache
+
+    try:
+        resp = requests.get(f"{MBX_URL}/ticker/24hr", timeout=15)
+        data = resp.json()
+        if not isinstance(data, list):
+            return {}
+
+        stats = {}
+        for item in data:
+            sym = item.get("symbol", "")
+            if not sym:
+                continue
+            qv = float(item.get("quoteVolume", 0) or 0)
+            vol = float(item.get("volume", 0) or 0)
+            price_change = float(item.get("priceChangePercent", 0) or 0)
+            high = float(item.get("highPrice", 0) or 0)
+            low = float(item.get("lowPrice", 0) or 0)
+            # Approx volume spike: kalau ada count trades, ratio = trades / avg
+            # Karena 24hr ticker tidak punya data per-candle, kita pakai
+            # price change absolut + quote volume sebagai proxy pump.
+            # (Volume spike ekstrem akan dideteksi juga di scanner via calc_volume_trend)
+            stats[sym] = {
+                "quote_volume": qv,
+                "volume": vol,
+                "price_change_pct": price_change,
+                "high": high,
+                "low": low,
+                # Proxy: price change besar = volatilitas tinggi = potensi hot
+                "volume_spike_ratio": max(1.0, abs(price_change) / 3.0),  # rough scaling
+            }
+
+        _ticker_stats_cache = stats
+        _ticker_stats_time = now
+        return stats
+    except Exception as e:
+        logger.warning(f"24h ticker stats error: {e}")
+        return _ticker_stats_cache or {}
 
 
 def fetch_candles(symbol: str, timeframe: str = None, limit: int = None) -> list:
@@ -439,7 +517,7 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
             "amount": qty, "value_idr": val, "price": price, "status": "simulated",
         }
 
-    sym_str   = _format_nextme(symbol)
+    sym_str   = _format_nextme(symbol)  # endpoint /open/v1/orders pakai NextMe format
     side_enum = 0 if side == "buy" else 1
 
     params = {
@@ -447,6 +525,9 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
         "side":   side_enum,
         "type":   2,  # MARKET
     }
+    # Catatan: endpoint /open/v1/orders konsisten pakai format NextMe (BTC_IDR)
+    # untuk semua symbol type. Berbeda dengan fetch_ticker_price/fetch_candles
+    # yang dispatch berdasarkan type (MBX vs NextMe).
 
     if side == "buy":
         params["quoteOrderQty"] = str(int(amount_idr))

@@ -273,7 +273,23 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
     filled_price = result.get("price") or price
 
     risk.record_trade(symbol, "buy", filled_qty, filled_price, result.get("id"))
-    risk.open_position(symbol, filled_qty, filled_price, value_idr=trade_amt)
+
+    # ── TP Adaptif: naikkan TP kalau momentum kuat (profil Moderat) ──
+    tp_pct = Config.TAKE_PROFIT_PERCENT
+    if Config.TP_ADAPTIVE_ENABLED:
+        ema_gap = abs(coin.get("ema_gap_pct", 0))
+        if ema_gap >= Config.TP_ADAPTIVE_EMA_GAP_TRIGGER:
+            # Scale: baseline → max_TP secara linear dengan EMA gap
+            # Mis. gap 1% → baseline + 0%, gap 3% → ~max_TP
+            scale = min(1.0, (ema_gap - Config.TP_ADAPTIVE_EMA_GAP_TRIGGER) / 2.0)
+            tp_pct = Config.TAKE_PROFIT_PERCENT + (
+                Config.TP_ADAPTIVE_MAX_PERCENT - Config.TAKE_PROFIT_PERCENT
+            ) * scale
+            logger.info(
+                f"TP adaptif aktif: {tp_pct:.2f}% (EMA gap {ema_gap:.2f}%, baseline {Config.TAKE_PROFIT_PERCENT}%)"
+            )
+
+    risk.open_position(symbol, filled_qty, filled_price, value_idr=trade_amt, take_profit_pct=tp_pct)
 
     logger.info(
         f"BELI BERHASIL: {symbol} | {filled_qty:.6f} crypto | "
@@ -492,12 +508,32 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         logger.info("Scan-only selesai.")
         return
 
-    # -- PHASE 4: ENTRY -- Beli kalau belum ada posisi ----------------------
+    # -- PHASE 4: ENTRY -- Beli beberapa kandidat hingga posisi terisi -----
+    # Diversifikasi: isi slot yang kosong dengan top kandidat BUY (bukan hanya top 1)
     bought = False
     current_positions = len(risk.state.get("positions", []))
     max_positions     = Config.get_max_positions(available_balance)
-    if current_positions < max_positions:
-        bought = try_buy_best_coin(risk, rankings, available_balance)
+    slots_available   = max_positions - current_positions
+
+    if slots_available > 0:
+        buy_candidates = [
+            c for c in rankings
+            if c.get("action") == "BUY" and not c.get("falling_knife", False)
+        ]
+        # Ambil sebanyak slot yang tersedia, tapi tetap hormati cooldown & risk gate
+        for i, coin in enumerate(buy_candidates[:slots_available]):
+            # Cek ulang risk gate tiap iterasi (cooldown berlaku setelah buy sukses)
+            can, reason = risk.can_trade(available_balance)
+            if not can:
+                logger.info(f"Stop diversifikasi: {reason}")
+                break
+            slot_label = f"[slot {i+1}/{slots_available}] " if slots_available > 1 else ""
+            logger.info(f"{slot_label}Coba beli {coin['symbol']} (skor {coin.get('score', 0)})")
+            if _execute_buy(risk, coin, coin.get("reason", "Diversifikasi entry")):
+                bought = True
+                # Setelah buy sukses, cooldown aktif. Stop loop karena iterasi
+                # berikutnya pasti diblok cooldown.
+                break
     else:
         logger.info(f"Posisi penuh ({current_positions}/{max_positions}), skip beli")
 
