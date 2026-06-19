@@ -162,7 +162,10 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
 
     if result.get("error"):
         logger.error(f"Sell gagal {symbol}: {result['error']}")
-        notifier.notify_error(f"Sell gagal: {symbol}\n{result['error']}")
+        notifier.notify_error(
+            f"Sell gagal: {symbol}\n{result['error']}",
+            context=f"_execute_sell({symbol}, qty={amount:.6f}, reason={reason})"
+        )
         return False
 
     actual_price = result.get("price") or price
@@ -189,7 +192,8 @@ def try_buy_best_coin(risk: RiskManager, rankings: list, available_balance: floa
     if not can:
         logger.info(f"Tidak bisa beli: {reason}")
         if "Emergency stop" in reason or "Daily loss limit" in reason or "Win rate rendah" in reason:
-            notifier.notify_error(f"Bot pause otomatis:\n{reason}")
+            # Status bot normal (pause proteksi), bukan error sistem. Pakai INFO.
+            notifier.notify_info(f"Bot pause otomatis:\n{reason}")
         return False
 
     buy_candidates = [
@@ -233,7 +237,11 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
         available = balance["quote"]["free"]
     except Exception as e:
         logger.error(f"Gagal mengambil saldo: {e}")
-        notifier.notify_error(f"Gagal mengambil saldo Tokocrypto:\n{e}")
+        notifier.notify_error(
+            f"Gagal mengambil saldo Tokocrypto:\n{e}",
+            context=f"_execute_buy({symbol}) get_balance()",
+            force_send=True  # error kritis: API down / auth / IP
+        )
         return False
 
     # Dynamic position sizing: persentase dari saldo riil
@@ -252,13 +260,22 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
 
     if available < trade_amt:
         logger.warning(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
-        notifier.notify_error(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
+        # Kondisi normal (saldo menipis), bukan error sistem. Pakai INFO.
+        notifier.notify_info(
+            f"Saldo IDR tidak cukup untuk beli {symbol}.\n"
+            f"Tersedia: Rp {available:,.0f} | Butuh: Rp {trade_amt:,.0f}\n"
+            f"💡 Silakan top up saldo Tokocrypto."
+        )
         return False
 
     # Validasi pair IDR aktif di Tokocrypto (defense-in-depth)
     if not check_market_active(symbol):
         logger.error(f"Pair {symbol} tidak tersedia/aktif di Tokocrypto! Skip buy.")
-        notifier.notify_error(f"Pair {symbol} tidak ada/aktif di Tokocrypto. Buy dibatalkan.")
+        # Kondisi market (pair delisted/baru), bukan error sistem. Pakai WARNING.
+        notifier.notify_warning(
+            f"Pair {symbol} tidak tersedia/aktif di Tokocrypto.\n"
+            f"Buy dibatalkan untuk pair ini."
+        )
         return False
 
     logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.2f} | Modal: Rp {trade_amt:,.0f} (dari saldo Rp {available:,.0f}) | Alasan: {reason}")
@@ -266,7 +283,10 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
 
     if result.get("error"):
         logger.error(f"Buy gagal {symbol}: {result['error']}")
-        notifier.notify_error(f"Buy gagal: {symbol}\n{result['error']}")
+        notifier.notify_error(
+            f"Buy gagal: {symbol}\n{result['error']}",
+            context=f"_execute_buy({symbol}, amt=Rp {trade_amt:,.0f}, score={score})"
+        )
         return False
 
     filled_qty   = result.get("amount", trade_amt / price if price > 0 else 0)
@@ -321,14 +341,22 @@ def run_force_buy(risk: RiskManager, symbol_input: str):
         bal = get_balance()
         available_balance = bal["quote"]["free"]
     except Exception as e:
-        notifier.notify_error(f"Force buy gagal ambil saldo: {e}")
+        notifier.notify_error(
+            f"Force buy gagal ambil saldo: {e}",
+            context=f"force_buy({sym}) get_balance()",
+            force_send=True  # error kritis: API down
+        )
         return
 
     can, reason = risk.can_trade(available_balance)
     if not can:
         msg = f"Force buy dibatalkan: {reason}"
         logger.warning(msg)
-        notifier.notify_error(msg)
+        # Bisa jadi INFO (pause proteksi) atau WARNING (cooldown). Cek keyword.
+        if "Emergency stop" in reason or "Daily loss" in reason or "Win rate" in reason:
+            notifier.notify_info(f"Force buy tidak bisa diproses:\n{reason}")
+        else:
+            notifier.notify_warning(f"Force buy dibatalkan:\n{reason}")
         return
 
     # Ambil harga terkini
@@ -339,7 +367,10 @@ def run_force_buy(risk: RiskManager, symbol_input: str):
             price = candles[-1]["close"]
 
     if price <= 0:
-        notifier.notify_error(f"Force buy gagal: tidak bisa dapat harga untuk {sym}")
+        notifier.notify_warning(
+            f"Force buy gagal: tidak bisa dapat harga untuk {sym}.\n"
+            f"Possibly pair delisted atau API error."
+        )
         return
 
     # Ambil score untuk info
@@ -411,10 +442,11 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
             logger.warning(
                 f"Saldo IDR tidak cukup: Rp {available_balance:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}"
             )
-            notifier.send_telegram(
-                f"⚠️ <b>CuanBot Saldo Tidak Cukup</b>\n"
+            # Kondisi normal (perlu top up), bukan error sistem. Pakai INFO.
+            notifier.notify_info(
                 f"Saldo IDR Anda (Rp {available_balance:,.0f}) kurang dari minimum "
-                f"(Rp {Config.MIN_ORDER_IDR:,.0f}). Silakan top up."
+                f"(Rp {Config.MIN_ORDER_IDR:,.0f}).\n"
+                f"💡 Silakan top up saldo Tokocrypto untuk mulai trading."
             )
             return
 
@@ -428,7 +460,11 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
     except Exception as e:
         logger.error(f"Init gagal: {e}")
-        notifier.notify_error(f"Init gagal (Cek API Key / IP Whitelist / Tokocrypto down):\n{e}")
+        notifier.notify_error(
+            f"Init gagal (Cek API Key / IP Whitelist / Tokocrypto down):\n{e}",
+            context="run() init phase — get_balance/RiskManager",
+            force_send=True  # error kritis: bot tidak bisa mulai sama sekali
+        )
         return
 
     # Startup notif (skip di quick mode, anti-spam)
@@ -490,7 +526,8 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         logger.warning("Tidak ada coin yang bisa di-scan")
         notifier.notify_error(
             "Gagal melakukan scan coin (0 coin berhasil di-scan).\n"
-            "Kemungkinan koneksi internet terganggu, rate limit Tokocrypto API, atau IP diblok."
+            "Kemungkinan koneksi internet terganggu, rate limit Tokocrypto API, atau IP diblok.",
+            context="run() Phase 3 — scan_all_coins returned empty"
         )
         risk.save_state()
         return
