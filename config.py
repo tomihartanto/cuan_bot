@@ -26,7 +26,7 @@ class Config:
     # ── Modal & Dynamic Capital Deployment ────────────────────────────
     BASE_CURRENCY          = "IDR"  # Tokocrypto IDR-only
     INITIAL_TRADE_AMOUNT   = float(os.getenv("INITIAL_TRADE_AMOUNT", "10000"))  # Fallback / display
-    MIN_ORDER_IDR          = float(os.getenv("MIN_ORDER_IDR", "10000"))  # Min notional Tokocrypto (~10k IDR)
+    MIN_ORDER_IDR          = float(os.getenv("MIN_ORDER_IDR", "20000"))  # Min notional Tokocrypto (~20k IDR, verified via API)
     WORKING_CAPITAL_PCT    = float(os.getenv("WORKING_CAPITAL_PCT", "0.85"))  # 85% saldo diputar, 15% buffer
     MIN_CAPITAL_PER_POSITION = float(os.getenv("MIN_CAPITAL_PER_POSITION", "50000"))  # Modal ideal per posisi
     AUTO_COMPOUND          = os.getenv("AUTO_COMPOUND", "true").lower() == "true"
@@ -153,8 +153,14 @@ class Config:
 
         result = min(per_trade, max_per_trade)
 
-        # Kalau hasil akhir masih di bawah min order, return 0 (jangan paksa)
-        if result < cls.MIN_ORDER_IDR:
-            return 0.0
+        # ── Minimum buy safeguard ────────────────────────────────────
+        # Pastikan modal cukup besar agar SETELAH stop loss (-1.8%) + fee (~0.1%),
+        # nilai posisi masih di atas MIN_ORDER_IDR untuk bisa dijual.
+        # Jika modal = Rp 20,000, setelah SL: 20000 × (1 - 0.019) = Rp 19,620 → tidak bisa dijual!
+        # Safeguard: modal buy minimal = MIN_ORDER_IDR / (1 - max_loss_pct)
+        max_loss_pct = max(cls.STOP_LOSS_PERCENT, 2.0) / 100  # paling tidak 2% safety
+        min_safe_buy = cls.MIN_ORDER_IDR / (1 - max_loss_pct)  # ~Rp 20,408 untuk SL 1.8%
+        if result < min_safe_buy:
+            return 0.0  # modal terlalu kecil, skip buy (jangan sampai nyangkut tidak bisa dijual)
 
         return result

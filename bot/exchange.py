@@ -497,7 +497,7 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
     """
     Eksekusi market order via Tokocrypto API.
     BUY  -> quoteOrderQty (nominal IDR)
-    SELL -> quantity (jumlah crypto)
+    SELL -> quantity (jumlah crypto), fallback ke quoteOrderQty kalau gagal min notional
 
     Validasi nominal minimum (MIN_ORDER_IDR) diterapkan untuk kedua sisi.
     """
@@ -532,13 +532,28 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
     if side == "buy":
         params["quoteOrderQty"] = str(int(amount_idr))
     else:
-        # Gunakan precision dari symbol info (hindari order rejection karena stepSize)
+        # SELL: gunakan precision dari symbol info
         precision = _get_base_precision(symbol)
         params["quantity"] = f"{amount_base:.{precision}f}"
 
     data = _signed_post("/open/v1/orders", params)
     if not data:
-        return {"error": "Order gagal, response kosong"}
+        # ── Fallback SELL via quoteOrderQty ──────────────────────────
+        # Jika quantity sell gagal (response kosong / min notional), coba
+        # jual berdasarkan nilai IDR (quoteOrderQty). Ini berguna saat
+        # precision/stepSize menyebabkan rejected, atau nilai sedikit
+        # di bawah minimum dengan quantity tapi masih cukup dengan quote.
+        if side == "sell" and amount_base and price and price > 0:
+            sell_value_idr = int(amount_base * price)
+            if sell_value_idr >= Config.MIN_ORDER_IDR:
+                logger.info(f"SELL {symbol}: retry via quoteOrderQty=Rp {sell_value_idr:,}")
+                fallback_params = {
+                    "symbol": sym_str, "side": 1, "type": 2,
+                    "quoteOrderQty": str(sell_value_idr),
+                }
+                data = _signed_post("/open/v1/orders", fallback_params)
+        if not data:
+            return {"error": "Order gagal, response kosong (quantity & quoteOrderQty fallback)"}
 
     filled_qty   = float(data.get("executedQty", 0) or 0)
     filled_price = float(data.get("executedPrice", 0) or price or 0)

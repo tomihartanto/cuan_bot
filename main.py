@@ -35,6 +35,7 @@ from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
 from bot import notifier
 from bot.ai import filter_buy_signal
+from bot.market_intel import get_intel_bonus, get_market_summary, get_market_sentiment
 
 # -- Logging ---------------------------------------------------------
 log_dir = os.path.join(PROJECT_ROOT, "logs")
@@ -89,6 +90,23 @@ def scan_all_coins() -> list:
                 analysis = quick
 
             analysis["symbol"] = pair
+
+            # ── Market Intel bonus/penalty (Binance.vision + CoinGecko) ──
+            try:
+                coin_base = pair.split("/")[0]
+                intel = get_intel_bonus(coin_base)
+                intel_bonus = intel["bonus"]
+                if intel_bonus != 0:
+                    old_score = analysis["score"]
+                    analysis["score"] = max(0, min(100, old_score + intel_bonus))
+                    intel_reason = f"[Intel {intel_bonus:+d}] {intel['reason']}"
+                    analysis["reason"] = f"{analysis.get('reason', '')} | {intel_reason}"
+                    logger.debug(
+                        f"Intel {pair}: {old_score} → {analysis['score']} ({intel_bonus:+d}) | {intel['reason']}"
+                    )
+            except Exception as e:
+                logger.debug(f"Intel bonus error for {pair}: {e}")
+
             results.append(analysis)
             scanned += 1
             time.sleep(0.3)
@@ -107,7 +125,7 @@ def scan_all_coins() -> list:
 # ------------------------------------------------------------
 
 def check_and_sell_positions(risk: RiskManager) -> bool:
-    """Cek semua posisi terbuka, jual kalau TP/SL/Trailing/Timeout terpenuhi."""
+    """Cek semua posisi terbuka, jual kalau TP/SL/Trailing/Timeout/Bearish terpenuhi."""
     positions = risk.state.get("positions", [])
     if not positions:
         return False
@@ -125,6 +143,30 @@ def check_and_sell_positions(risk: RiskManager) -> bool:
 
     # check_positions() update trailing high/stop in-place → selalu save
     sell_actions = risk.check_positions(current_prices)
+
+    # ── Bearish market exit: jual kalau market global lagi crash ────
+    # Cek sentiment global, kalau bearish dan posisi profit tipis/rugi → jual
+    try:
+        sentiment = get_market_sentiment()
+        if sentiment["direction"] == "bearish" and sentiment["btc_change"] < -4.0:
+            for pos in risk.state.get("positions", []):
+                sym = pos["symbol"]
+                price = current_prices.get(sym, 0)
+                if price <= 0:
+                    continue
+                pnl = ((price - pos["entry_price"]) / pos["entry_price"] * 100)
+                # Kalau rugi atau profit tipis (< +0.5%), exit untuk amankan
+                if pnl < 0.5 and sym not in [a["symbol"] for a in sell_actions]:
+                    sell_actions.append({
+                        "symbol": sym,
+                        "amount": pos["amount"],
+                        "price":  price,
+                        "reason": f"🛡️ Bearish exit (BTC {sentiment['btc_change']:+.1f}%, PnL {pnl:+.1f}%)",
+                    })
+                    logger.warning(f"BEARISH EXIT {sym}: BTC {sentiment['btc_change']:+.1f}%")
+    except Exception as e:
+        logger.debug(f"Bearish exit check error: {e}")
+
     sold_any = False
     for action in sell_actions:
         if _execute_sell(risk, action):
@@ -214,15 +256,18 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
     price  = coin["price"]
     score  = coin.get("score", 0)
 
-    # -- AI Filter Check (Z.ai GLM-5.2) --
+    # -- AI Filter Check (Z.ai GLM-4.7-flash) --
     if not bypass_ai:
         ai_ok, ai_reason = filter_buy_signal(symbol, coin)
         if not ai_ok:
             logger.info(f"BUY {symbol} dibatalkan oleh AI. Alasan: {ai_reason}")
-            notifier.send_telegram(
+            # Anti-spam: rate limit AI HOLD notif per coin (4 jam)
+            notifier._send_categorized(
+                "AI_HOLD",
                 f"🤖 <b>AI Filter: HOLD {symbol}</b>\n"
                 f"Skor Teknis: {score}/100\n"
-                f"Alasan AI: {ai_reason}"
+                f"Alasan: {ai_reason}",
+                dedup_key_override=f"ai_hold:{symbol}",
             )
             return False
         elif Config.ZAI_API_KEY:
@@ -470,7 +515,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
     # Startup notif (skip di quick mode, anti-spam)
     if not quick_check and risk.should_send_startup_notif():
         valid_pairs = len(get_trade_pairs())
-        notifier.notify_startup(num_pairs=valid_pairs)
+        notifier.notify_startup(num_pairs=valid_pairs, market_info=get_market_summary())
 
     status = risk.get_status(available_balance)
     logger.info(

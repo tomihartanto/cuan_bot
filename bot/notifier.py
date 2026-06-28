@@ -26,9 +26,10 @@ _notification_history = defaultdict(list)
 
 # Cooldown per kategori (detik). Pesanan identik tidak dikirim ulang dalam window ini.
 RATE_LIMIT_SECONDS = {
-    "ERROR":   1800,   # 30 menit — error sistem yang sama
-    "WARNING": 3600,   # 1 jam    — warning kondisi market
-    "INFO":    7200,   # 2 jam    — status info (saldo, pause)
+    "ERROR":   3600,   # 1 jam — error sistem yang sama (naik dari 30 menit, anti-spam)
+    "WARNING": 7200,   # 2 jam   — warning kondisi market (naik dari 1 jam, anti-spam)
+    "INFO":    14400,  # 4 jam   — status info (naik dari 2 jam, anti-spam)
+    "AI_HOLD": 14400,  # 4 jam   — AI filter HOLD notification (dedup per coin)
     # TRADE & SUMMARY: tidak di-rate limit (handled by caller)
 }
 
@@ -289,11 +290,12 @@ def notify_min_notional(side: str, symbol: str, value_idr: float,
     )
 
 
-def notify_startup(num_pairs: int = None):
+def notify_startup(num_pairs: int = None, market_info: str = None):
     mode     = "🧪 DRY RUN" if Config.DRY_RUN else "🔴 LIVE TRADING"
     trail    = f"ON ({Config.TRAILING_PERCENT}%, aktif di +{Config.TRAILING_ACTIVATION}%)"  if Config.TRAILING_STOP_ENABLED else "OFF"
     compound = "ON" if Config.AUTO_COMPOUND else "OFF"
     scan_info = f"{num_pairs} pair IDR likuid" if num_pairs else "0 pair"
+    market_line = f"\n🌐 Market: {market_info}" if market_info else ""
 
     send_telegram(
         f"🤖 <b>CuanBot v4 — Siap Trading!</b>\n"
@@ -308,6 +310,7 @@ def notify_startup(num_pairs: int = None):
         f"📈 Trailing: {trail}\n"
         f"🔄 Compound: {compound}\n"
         f"🛡️ Emergency stop: setelah {Config.EMERGENCY_STOP_LOSSES}x rugi berturut"
+        f"{market_line}"
     )
 
 

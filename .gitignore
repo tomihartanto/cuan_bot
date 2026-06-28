@@ -6,9 +6,7 @@ logs/
 *.log
 venv/
 .env.local
-debug_*.py
-test_*.py
-check_*.py
-chk*.py
-run_*.py
+state.json
 logs_archive.zip
+# Scratch / experimental scripts (keep tests and runners tracked!)
+scratch/

@@ -244,4 +244,8 @@ def score_coin_multi_tf(candles_by_tf: dict) -> dict:
         "reason": reason,
         "price": primary.get("price", 0),
         "falling_knife": any(s.get("falling_knife", False) for s in scores.values()),
+        # Propagate fields yang dibutuhkan oleh main.py (TP adaptif, logging):
+        "ema_gap_pct": primary.get("ema_gap_pct", 0),
+        "is_hot": primary.get("is_hot", False),
+        "volatility_pct": primary.get("volatility_pct", 2.0),
     }

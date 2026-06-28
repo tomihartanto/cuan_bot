@@ -1,6 +1,6 @@
 """
-CuanBot v4 - AI Decision Support (Z.ai GLM-5.2)
-Menggunakan model GLM-5.2 untuk menyaring sinyal BUY dari indikator teknikal.
+CuanBot v4 - AI Decision Support (Z.ai GLM-4.7-flash)
+Menggunakan model GLM-4.7-flash untuk menyaring sinyal BUY dari indikator teknikal.
 """
 
 import requests
@@ -12,7 +12,7 @@ logger = logging.getLogger("cuanbot")
 
 def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     """
-    Kirim data teknikal ke Z.ai GLM-5.2 untuk analisis tambahan.
+    Kirim data teknikal ke Z.ai GLM-4.7-flash untuk analisis tambahan.
 
     Returns:
         (bool, str): (apakah disetujui BUY, alasan/penjelasan AI)
@@ -28,7 +28,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
             return True, f"AI nonaktif (ZAI_API_KEY kosong). Skor {score}/100 >= {Config.AI_FALLBACK_MIN_SCORE} → lolos."
         return False, f"AI nonaktif & skor {score}/100 < {Config.AI_FALLBACK_MIN_SCORE} → ditolak (filter ketat)."
 
-    logger.info(f"Meminta analisis AI Z.ai (GLM-5.2) untuk {symbol}...")
+    logger.info(f"Meminta analisis AI Z.ai (GLM-4.7-flash) untuk {symbol}...")
 
     # Data indicators
     signals = score_data.get("signals", {})
@@ -107,7 +107,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
             return False, content
 
     except Exception as e:
-        err_msg = f"Gagal menghubungi API Z.ai (GLM-5.2): {e}"
+        err_msg = f"Gagal menghubungi API Z.ai (GLM-4.7-flash): {e}"
         logger.warning(err_msg)
         # Fallback aman: hanya lolos kalau skor sangat kuat (>= AI_FALLBACK_MIN_SCORE)
         score = score_data.get("score", 0)
