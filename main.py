@@ -29,7 +29,6 @@ from bot.exchange import (
     get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
     check_idr_balance, check_market_active,
-    validate_min_notional,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
@@ -178,24 +177,21 @@ def check_and_sell_positions(risk: RiskManager) -> bool:
 
 
 def _execute_sell(risk: RiskManager, action: dict) -> bool:
-    """Eksekusi satu sell order."""
+    """Eksekusi satu sell order. Diam-diam kalau min notional (no Telegram spam)."""
     symbol = action["symbol"]
     amount = action["amount"]
     price  = action["price"]
     reason = action["reason"]
 
-    # ── Client-side pre-check: nominal minimum SELL ────────────────
-    ok, err = validate_min_notional("sell", amount_base=amount, price=price)
-    if not ok:
-        value_idr = amount * price if price > 0 else 0
-        logger.warning(
-            f"[PRE-CHECK] SELL {symbol} diblokir: {err} "
-            f"(qty={amount:.8f}, nilai=Rp {value_idr:,.0f}, min=Rp {Config.MIN_ORDER_IDR:,.0f})"
-        )
-        notifier.notify_min_notional(
-            side="sell", symbol=symbol,
-            value_idr=value_idr, min_idr=Config.MIN_ORDER_IDR,
-            extra=f"Alasan sell: {reason}"
+    value_idr = amount * price if price > 0 else 0
+
+    # ── Cek minimum: kalau di bawah minimum, skip diam-diam ──────────
+    # Jangan kirim notifikasi Telegram (anti-spam). Cukup log.
+    # Bot akan retry di cycle berikutnya saat harga naik atau amount cukup.
+    if value_idr < Config.MIN_ORDER_IDR:
+        logger.info(
+            f"[SKIP-SELL] {symbol}: nilai Rp {value_idr:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f} "
+            f"(qty={amount:.8f}). Dilewati diam-diam, retry cycle depan."
         )
         return False
 
@@ -203,11 +199,7 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
     result = place_order(symbol, "sell", amount_base=amount, price=price)
 
     if result.get("error"):
-        logger.error(f"Sell gagal {symbol}: {result['error']}")
-        notifier.notify_error(
-            f"Sell gagal: {symbol}\n{result['error']}",
-            context=f"_execute_sell({symbol}, qty={amount:.6f}, reason={reason})"
-        )
+        logger.warning(f"Sell gagal {symbol}: {result['error']}")
         return False
 
     actual_price = result.get("price") or price
@@ -292,46 +284,31 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
     # Dynamic position sizing: persentase dari saldo riil
     trade_amt = Config.get_trade_amount(available)
     if trade_amt < Config.MIN_ORDER_IDR:
-        logger.warning(
-            f"[PRE-CHECK] Modal terlalu kecil: Rp {trade_amt:,.2f} < min Rp {Config.MIN_ORDER_IDR:,.2f} "
-            f"(saldo Rp {available:,.0f})"
-        )
-        notifier.notify_min_notional(
-            side="buy", symbol=symbol,
-            value_idr=trade_amt, min_idr=Config.MIN_ORDER_IDR,
-            extra=f"Saldo tersedia: Rp {available:,.0f}"
+        logger.info(
+            f"[SKIP-BUY] {symbol}: modal Rp {trade_amt:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f} "
+            f"(saldo Rp {available:,.0f}). Dilewati diam-diam."
         )
         return False
 
     if available < trade_amt:
-        logger.warning(f"Saldo IDR tidak cukup: Rp {available:,.2f} < Rp {trade_amt:,.2f}")
-        # Kondisi normal (saldo menipis), bukan error sistem. Pakai INFO.
-        notifier.notify_info(
-            f"Saldo IDR tidak cukup untuk beli {symbol}.\n"
-            f"Tersedia: Rp {available:,.0f} | Butuh: Rp {trade_amt:,.0f}\n"
-            f"💡 Silakan top up saldo Tokocrypto."
-        )
+        logger.info(f"Saldo IDR tidak cukup: Rp {available:,.0f} < Rp {trade_amt:,.0f}. Skip buy {symbol}.")
         return False
 
     # Validasi pair IDR aktif di Tokocrypto (defense-in-depth)
     if not check_market_active(symbol):
-        logger.error(f"Pair {symbol} tidak tersedia/aktif di Tokocrypto! Skip buy.")
-        # Kondisi market (pair delisted/baru), bukan error sistem. Pakai WARNING.
-        notifier.notify_warning(
-            f"Pair {symbol} tidak tersedia/aktif di Tokocrypto.\n"
-            f"Buy dibatalkan untuk pair ini."
-        )
+        logger.warning(f"Pair {symbol} tidak tersedia/aktif di Tokocrypto! Skip buy.")
         return False
 
     logger.info(f"BUY {symbol} | Skor: {score}/100 | Rp {price:,.2f} | Modal: Rp {trade_amt:,.0f} (dari saldo Rp {available:,.0f}) | Alasan: {reason}")
     result = place_order(symbol, "buy", amount_idr=trade_amt, price=price)
 
     if result.get("error"):
-        logger.error(f"Buy gagal {symbol}: {result['error']}")
-        notifier.notify_error(
-            f"Buy gagal: {symbol}\n{result['error']}",
-            context=f"_execute_buy({symbol}, amt=Rp {trade_amt:,.0f}, score={score})"
-        )
+        err = result["error"]
+        # Anti-spam: min notional error cukup di-log, jangan kirim Telegram
+        if "min" in err.lower() or "notional" in err.lower() or "20" in err:
+            logger.info(f"Buy {symbol} diblokir min notional: {err}")
+        else:
+            logger.warning(f"Buy gagal {symbol}: {err}")
         return False
 
     filled_qty   = result.get("amount", trade_amt / price if price > 0 else 0)
