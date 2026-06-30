@@ -32,12 +32,12 @@ class Config:
     AUTO_COMPOUND          = os.getenv("AUTO_COMPOUND", "true").lower() == "true"
 
     # ── Risk & Profit ─────────────────────────────────────────────────
-    TAKE_PROFIT_PERCENT  = float(os.getenv("TAKE_PROFIT_PERCENT", "2.5"))   # 2.5% TP (fee-aware)
-    STOP_LOSS_PERCENT    = float(os.getenv("STOP_LOSS_PERCENT", "1.8"))     # 1.8% SL (fee-aware)
-    MAX_TRADES_PER_DAY   = int(os.getenv("MAX_TRADES_PER_DAY", "10"))
-    COOLDOWN_MINUTES     = int(os.getenv("COOLDOWN_MINUTES", "5"))
+    TAKE_PROFIT_PERCENT  = float(os.getenv("TAKE_PROFIT_PERCENT", "2.0"))   # 2.0% TP — ambil profit cepat
+    STOP_LOSS_PERCENT    = float(os.getenv("STOP_LOSS_PERCENT", "1.0"))     # 1.0% SL — cut loss instan, jangan minus besar
+    MAX_TRADES_PER_DAY   = int(os.getenv("MAX_TRADES_PER_DAY", "15"))       # Lebih banyak trade = lebih banyak peluang
+    COOLDOWN_MINUTES     = int(os.getenv("COOLDOWN_MINUTES", "3"))          # Cooldown pendek untuk scalping
     MAX_OPEN_POSITIONS   = int(os.getenv("MAX_OPEN_POSITIONS", "5"))        # Cap maksimal posisi paralel
-    POSITION_TIMEOUT_HOURS = float(os.getenv("POSITION_TIMEOUT_HOURS", "6"))  # Auto-sell kalau nyangkut 6 jam
+    POSITION_TIMEOUT_HOURS = float(os.getenv("POSITION_TIMEOUT_HOURS", "3"))  # Auto-sell kalau nyangkut 3 jam
 
     # ── Safety Nets ───────────────────────────────────────────────────
     DAILY_LOSS_LIMIT_PCT   = float(os.getenv("DAILY_LOSS_LIMIT_PCT", "3.0"))   # Stop hari itu kalau rugi >= 3% saldo awal hari
@@ -46,8 +46,8 @@ class Config:
 
     # ── Trailing Stop ─────────────────────────────────────────────────
     TRAILING_STOP_ENABLED = os.getenv("TRAILING_STOP_ENABLED", "true").lower() == "true"
-    TRAILING_PERCENT      = float(os.getenv("TRAILING_PERCENT", "0.5"))     # Trailing 0.5% dari high
-    TRAILING_ACTIVATION   = float(os.getenv("TRAILING_ACTIVATION", "0.8"))  # Aktif setelah profit 0.8%
+    TRAILING_PERCENT      = float(os.getenv("TRAILING_PERCENT", "0.3"))     # Trailing ketat 0.3% dari high
+    TRAILING_ACTIVATION   = float(os.getenv("TRAILING_ACTIVATION", "0.3"))  # Aktif segera di +0.3% profit
 
     # ── Scoring ───────────────────────────────────────────────────────
     MIN_SCORE_TO_BUY  = int(os.getenv("MIN_SCORE_TO_BUY", "55"))
@@ -76,7 +76,7 @@ class Config:
     # ── Liquidity Filter ──────────────────────────────────────────────
     # Hanya scan pair dengan volume 24 jam >= threshold (IDR).
     # Pair illiquid di-skip karena spread-nya gede (auto rugi).
-    MIN_VOLUME_IDR = float(os.getenv("MIN_VOLUME_IDR", "50000000"))  # Rp 50 jt / 24 jam
+    MIN_VOLUME_IDR = float(os.getenv("MIN_VOLUME_IDR", "5000000"))  # Rp 5jt — longgar untuk tangkap koin goreng
 
     # ── Emergency Stop ────────────────────────────────────────────────
     EMERGENCY_STOP_LOSSES = int(os.getenv("EMERGENCY_STOP_LOSSES", "3"))

@@ -166,6 +166,46 @@ def check_and_sell_positions(risk: RiskManager) -> bool:
     except Exception as e:
         logger.debug(f"Bearish exit check error: {e}")
 
+    # ── Momentum reversal: auto-sell saat sinyal teknikal berubah bearish ──
+    # Cek indikator teknikal coin yang sedang dipegang. Kalau EMA cross ke bawah
+    # atau RSI overbought lalu turun, jual sebelum hancur.
+    try:
+        for pos in risk.state.get("positions", []):
+            sym = pos["symbol"]
+            if sym in [a["symbol"] for a in sell_actions]:
+                continue  # sudah ada action, skip
+
+            candles = fetch_candles(sym, timeframe="5m", limit=50)
+            if not candles or len(candles) < 30:
+                continue
+
+            analysis = score_coin(candles)
+            price = current_prices.get(sym, 0)
+            pnl = ((price - pos["entry_price"]) / pos["entry_price"] * 100) if price > 0 else 0
+
+            # Jual kalau:
+            # 1. Sinyal teknikal = SELL (score <= 38), ATAU
+            # 2. EMA bearish cross + MACD bearish (momentum berbalik arah)
+            signals = analysis.get("signals", {})
+            ema_sig = signals.get("ema", {})
+            macd_sig = signals.get("macd", {})
+
+            technical_sell = (
+                analysis.get("action") == "SELL" or
+                (ema_sig.get("gap", 0) < -0.3 and not ema_sig.get("above", True))  # EMA turun
+            )
+
+            if technical_sell and pnl > -Config.STOP_LOSS_PERCENT:
+                sell_actions.append({
+                    "symbol": sym,
+                    "amount": pos["amount"],
+                    "price":  price if price > 0 else analysis.get("price", 0),
+                    "reason": f"📉 Momentum reversal (score {analysis['score']}, PnL {pnl:+.1f}%)",
+                })
+                logger.info(f"MOMENTUM SELL {sym}: score={analysis['score']} action={analysis['action']}")
+    except Exception as e:
+        logger.debug(f"Momentum reversal check error: {e}")
+
     sold_any = False
     for action in sell_actions:
         if _execute_sell(risk, action):
@@ -517,7 +557,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         risk.save_state()
         return
 
-    # -- PHASE 1: Reconcile state vs exchange balance ----------------------
+    # -- PHASE 1: Reconcile state vs exchange balance + Auto dust-sell ────
     if not Config.DRY_RUN and not scan_only:
         try:
             balance        = get_balance()
@@ -527,7 +567,34 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
                 price = fetch_ticker_price(pair)
                 if price > 0:
                     current_prices[pair] = price
+
             risk.reconcile_with_balance(balance["holdings"], current_prices)
+
+            # ── Auto dust-sell: jual coin kecil ke IDR ──────────────
+            # Kalau ada coin di exchange yang nilainya < MIN_ORDER_IDR,
+            # coba jual via quoteOrderQty (fitur penukaran kecil Tokocrypto).
+            # Hanya kalau total nilai cukup untuk minimum (≥ 20k IDR).
+            for asset, amounts in balance["holdings"].items():
+                total_amount = amounts.get("total", 0)
+                if total_amount <= 0:
+                    continue
+                pair = f"{asset}/{Config.BASE_CURRENCY}"
+                price = current_prices.get(pair, 0)
+                if price <= 0:
+                    continue
+                value_idr = total_amount * price
+
+                # Kalau coin tidak di-track sebagai posisi DAN nilainya kecil
+                tracked = any(p["symbol"] == pair for p in risk.state.get("positions", []))
+                if not tracked and value_idr >= Config.MIN_ORDER_IDR:
+                    # Bisa dijual, coba dust-sell
+                    logger.info(f"[DUST-SELL] {pair}: {total_amount:.8f} = Rp {value_idr:,.0f}")
+                    result = place_order(pair, "sell", amount_base=total_amount, price=price)
+                    if not result.get("error"):
+                        actual_price = result.get("price") or price
+                        logger.info(f"Dust-sell {pair} OK: Rp {actual_price * result.get('amount', total_amount):,.0f}")
+                    # Tidak kirim Telegram (anti-spam)
+
         except Exception as e:
             logger.warning(f"Reconcile gagal (lanjut): {e}")
 
