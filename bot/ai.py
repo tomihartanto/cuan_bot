@@ -1,6 +1,7 @@
 """
-CuanBot v4 - AI Decision Support (Z.ai GLM-4.7-flash)
-Menggunakan model GLM-4.7-flash untuk menyaring sinyal BUY dari indikator teknikal.
+CuanBot v4 - AI Decision Support (Dual Provider: Z.ai + Gemini Fallback)
+Menggunakan model AI untuk menyaring sinyal BUY dari indikator teknikal.
+Primary: Z.ai GLM-4.7-flash. Fallback: Google Gemini (Gemma 4 31B).
 """
 
 import requests
@@ -10,45 +11,104 @@ from config import Config
 logger = logging.getLogger("cuanbot")
 
 
+def _call_ai(url: str, api_key: str, model: str, prompt: str, provider_name: str) -> tuple[bool, str, bool]:
+    """
+    Kirim prompt ke provider AI (OpenAI-compatible format).
+    Returns: (approved, response_text, success)
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2
+    }
+
+    response = requests.post(
+        f"{url.rstrip('/')}/chat/completions",
+        headers=headers, json=data, timeout=30
+    )
+    response.raise_for_status()
+
+    result = response.json()
+    content = result["choices"][0]["message"]["content"].strip()
+    logger.info(f"Respon AI {provider_name}:\n{content}")
+
+    approved = "REKOMENDASI: BUY" in content
+    return approved, content, True
+
+
 def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     """
-    Kirim data teknikal ke Z.ai GLM-4.7-flash untuk analisis tambahan.
+    Kirim data teknikal ke AI untuk analisis tambahan.
+    Urutan: Z.ai (primary) → Gemini (fallback) → Score threshold (last resort).
 
     Returns:
-        (bool, str): (apakah disetujui BUY, alasan/penjelasan AI)
-
-    Fallback policy saat API error:
-        - Skor >= 75 (sangat kuat): lolos tanpa AI (konfirmasi indikator sudah meyakinkan)
-        - Skor < 75: BLOCK (lebih aman daripada meloloskan sinyal lemah tanpa filter AI)
+        (bool, str): (apakah disetujui BUY, alasan/penjelasan)
     """
-    if not Config.ZAI_API_KEY:
-        # AI tidak dikonfigurasi: terapkan threshold skoring sebagai pengganti filter AI
-        score = score_data.get("score", 0)
+    score = score_data.get("score", 0)
+
+    # ── AI tidak dikonfigurasi sama sekali ──
+    if not Config.ZAI_API_KEY and not Config.GEMINI_API_KEY:
         if score >= Config.AI_FALLBACK_MIN_SCORE:
-            return True, f"AI nonaktif (ZAI_API_KEY kosong). Skor {score}/100 >= {Config.AI_FALLBACK_MIN_SCORE} → lolos."
-        return False, f"AI nonaktif & skor {score}/100 < {Config.AI_FALLBACK_MIN_SCORE} → ditolak (filter ketat)."
+            return True, f"AI nonaktif. Skor {score}/100 >= {Config.AI_FALLBACK_MIN_SCORE} → lolos."
+        return False, f"AI nonaktif & skor {score}/100 < {Config.AI_FALLBACK_MIN_SCORE} → ditolak."
 
-    logger.info(f"Meminta analisis AI Z.ai (GLM-4.7-flash) untuk {symbol}...")
+    prompt = _build_prompt(symbol, score_data)
 
-    # Data indicators
+    # ── Primary: Z.ai GLM ──
+    if Config.ZAI_API_KEY:
+        try:
+            logger.info(f"Meminta analisis AI Z.ai ({Config.ZAI_MODEL}) untuk {symbol}...")
+            approved, content, _ = _call_ai(
+                Config.ZAI_API_URL, Config.ZAI_API_KEY, Config.ZAI_MODEL,
+                prompt, f"Z.ai/{Config.ZAI_MODEL}"
+            )
+            return approved, content
+        except Exception as e:
+            logger.warning(f"Gagal menghubungi Z.ai ({Config.ZAI_MODEL}): {e}")
+
+    # ── Fallback: Gemini ──
+    if Config.GEMINI_API_KEY:
+        try:
+            logger.info(f"Fallback → Gemini ({Config.GEMINI_MODEL}) untuk {symbol}...")
+            approved, content, _ = _call_ai(
+                Config.GEMINI_API_URL, Config.GEMINI_API_KEY, Config.GEMINI_MODEL,
+                prompt, f"Gemini/{Config.GEMINI_MODEL}"
+            )
+            return approved, f"[Fallback Gemini] {content}"
+        except Exception as e:
+            logger.warning(f"Gagal menghubungi Gemini ({Config.GEMINI_MODEL}): {e}")
+
+    # ── Last resort: score-based fallback ──
+    if score >= Config.AI_FALLBACK_MIN_SCORE:
+        return True, (
+            f"⚠️ Fallback (AI error): skor {score}/100 >= "
+            f"{Config.AI_FALLBACK_MIN_SCORE} → lolos."
+        )
+    return False, (
+        f"⛔ Fallback (AI error): skor {score}/100 < "
+        f"{Config.AI_FALLBACK_MIN_SCORE} → BLOCK untuk keamanan."
+    )
+
+
+def _build_prompt(symbol: str, score_data: dict) -> str:
+    """Bangun prompt analisis teknikal untuk AI."""
     signals = score_data.get("signals", {})
-    
-    # Menghandle data structure dari single-TF vs multi-TF
-    if "5m" in signals:
-        # Jika multi-timeframe
-        sig_5m = signals["5m"]
-    else:
-        sig_5m = signals
 
-    rsi = sig_5m.get("rsi", {}).get("value", "N/A")
-    macd_hist = sig_5m.get("macd", {}).get("hist", "N/A")
-    macd_bullish = sig_5m.get("macd", {}).get("bullish", "N/A")
-    bb_pos = sig_5m.get("bb", {}).get("position", "N/A")
-    ema_above = sig_5m.get("ema", {}).get("above", "N/A")
-    ema_gap_raw = sig_5m.get("ema", {}).get("gap", 0.0)
-    vol_ratio = sig_5m.get("volume", {}).get("ratio", "N/A")
+    # Handle single-TF vs multi-TF
+    sig = signals.get("5m", signals)
 
-    # Safe formatting: pastikan numerik sebelum format
+    rsi = sig.get("rsi", {}).get("value", "N/A")
+    macd_hist = sig.get("macd", {}).get("hist", "N/A")
+    macd_bullish = sig.get("macd", {}).get("bullish", "N/A")
+    bb_pos = sig.get("bb", {}).get("position", "N/A")
+    ema_above = sig.get("ema", {}).get("above", "N/A")
+    ema_gap_raw = sig.get("ema", {}).get("gap", 0.0)
+    vol_ratio = sig.get("volume", {}).get("ratio", "N/A")
+
     try:
         ema_gap_str = f"{float(ema_gap_raw):+.2f}%"
     except (ValueError, TypeError):
@@ -58,7 +118,7 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
     except (ValueError, TypeError):
         vol_ratio_str = "N/A"
 
-    prompt = (
+    return (
         f"Anda adalah pakar analisis kuantitatif crypto senior.\n"
         f"Kami mendeteksi sinyal beli teknikal untuk koin {symbol}.\n"
         f"Berikut adalah ringkasan indikator teknikal saat ini:\n"
@@ -78,39 +138,3 @@ def filter_buy_signal(symbol: str, score_data: dict) -> tuple[bool, str]:
         f"atau\n"
         f"REKOMENDASI: HOLD"
     )
-
-    try:
-        url = f"{Config.ZAI_API_URL.rstrip('/')}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {Config.ZAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": Config.ZAI_MODEL,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.2
-        }
-
-        response = requests.post(url, headers=headers, json=data, timeout=15)
-        response.raise_for_status()
-        
-        result = response.json()
-        content = result["choices"][0]["message"]["content"].strip()
-        
-        logger.info(f"Respon AI Z.ai:\n{content}")
-
-        if "REKOMENDASI: BUY" in content:
-            return True, content
-        else:
-            return False, content
-
-    except Exception as e:
-        err_msg = f"Gagal menghubungi API Z.ai (GLM-4.7-flash): {e}"
-        logger.warning(err_msg)
-        # Fallback aman: hanya lolos kalau skor sangat kuat (>= AI_FALLBACK_MIN_SCORE)
-        score = score_data.get("score", 0)
-        if score >= Config.AI_FALLBACK_MIN_SCORE:
-            return True, f"⚠️ Fallback (AI Error): {e}. Skor {score}/100 >= {Config.AI_FALLBACK_MIN_SCORE} → lolos."
-        return False, f"⛔ Fallback (AI Error): {e}. Skor {score}/100 < {Config.AI_FALLBACK_MIN_SCORE} → BLOCK untuk keamanan."

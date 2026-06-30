@@ -20,6 +20,12 @@ class Config:
     # glm-4.7-flash = murah & cepat untuk tugas simple (filter sinyal).
     ZAI_MODEL = os.getenv("ZAI_MODEL", "glm-4.7-flash")
 
+    # ── AI Fallback (Gemini) ──────────────────────────────────────────
+    # Otomatis dipakai kalau Z.ai gagal (timeout/rate limit/error).
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_API_URL = os.getenv("GEMINI_API_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+    GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemma-4-31b-it")
+
     # ── Mode ──────────────────────────────────────────────────────────
     DRY_RUN = os.getenv("DRY_RUN", "true").lower() == "true"
 
