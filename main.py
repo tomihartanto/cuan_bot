@@ -225,14 +225,26 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
 
     value_idr = amount * price if price > 0 else 0
 
-    # ── Cek minimum: kalau di bawah minimum, skip diam-diam ──────────
+    # ── Cek minimum: kalau di bawah minimum, coba quoteOrderQty ──────
     # Jangan kirim notifikasi Telegram (anti-spam). Cukup log.
-    # Bot akan retry di cycle berikutnya saat harga naik atau amount cukup.
     if value_idr < Config.MIN_ORDER_IDR:
+        # Coba jual via quoteOrderQty (fitur penukaran kecil Tokocrypto)
         logger.info(
-            f"[SKIP-SELL] {symbol}: nilai Rp {value_idr:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f} "
-            f"(qty={amount:.8f}). Dilewati diam-diam, retry cycle depan."
+            f"[DUST-SELL] {symbol}: nilai Rp {value_idr:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f}. "
+            f"Coba quoteOrderQty..."
         )
+        try:
+            result = place_order(symbol, "sell", amount_base=amount, price=price)
+            if not result.get("error"):
+                actual = result.get("price") or price
+                logger.info(f"Dust-sell {symbol} OK: {result.get('amount', amount):.8f} @ Rp {actual:,.0f}")
+                risk.close_position(symbol, actual)
+                risk.record_trade(symbol, "sell", result.get("amount", amount), actual)
+                return True
+            else:
+                logger.debug(f"Dust-sell {symbol} gagal: {result['error']}")
+        except Exception as e:
+            logger.debug(f"Dust-sell {symbol} error: {e}")
         return False
 
     logger.info(f"SELL {symbol}: {amount:.6f} @ Rp {price:,.0f} | {reason}")
@@ -254,6 +266,104 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
         compound=status.get("realized_pnl"),
     )
     return True
+
+
+# ------------------------------------------------------------
+# SWEEP WALLET -- Kelola SEMUA coin di dompet Tokocrypto
+# Investment manager: evaluasi setiap aset, jual yang tidak prospektif
+# ------------------------------------------------------------
+def sweep_wallet(risk: RiskManager) -> bool:
+    """
+    Evaluasi SEMUA coin di dompet Tokocrypto (bukan cuma posisi ter-track).
+    Jual coin yang:
+    1. Nilainya < min notional → coba quoteOrderQty (dust sell)
+    2. Tidak punya pair IDR (tidak bisa diperdagangkan) → skip
+    3. Sinyal teknikal bearish & tidak sedang di-tracking → jual ke IDR
+    """
+    try:
+        balance = get_balance()
+        holdings = balance.get("holdings", {})
+        if not holdings:
+            return False
+
+        traded_symbols = set()
+        available_balance = check_idr_balance()
+        sold_any = False
+
+        for asset, amounts in holdings.items():
+            free = amounts.get("free", 0)
+            if free <= 0:
+                continue
+
+            pair = f"{asset}/{Config.BASE_CURRENCY}"
+            price = fetch_ticker_price(pair)
+            if price <= 0:
+                logger.debug(f"[SWEEP] {asset}: tidak ada harga IDR, skip")
+                continue
+
+            value_idr = free * price
+
+            # Sudah di-track sebagai posisi aktif? Lewati, biar risk manager yang handle
+            tracked = any(p["symbol"] == pair for p in risk.state.get("positions", []))
+            if tracked:
+                traded_symbols.add(pair)
+                continue
+
+            # Nilai kecil → dust sell via quoteOrderQty
+            if value_idr < Config.MIN_ORDER_IDR:
+                logger.info(
+                    f"[SWEEP-DUST] {pair}: {free:.8f} = Rp {value_idr:,.0f}. Coba dust-sell..."
+                )
+                result = place_order(pair, "sell", amount_base=free, price=price)
+                if not result.get("error"):
+                    actual = result.get("price") or price
+                    amt = result.get("amount", free)
+                    logger.info(f"[SWEEP-DUST] ✅ {pair} → IDR Rp {actual * amt:,.0f}")
+                    sold_any = True
+                else:
+                    logger.debug(f"[SWEEP-DUST] {pair} gagal: {result['error']}")
+                continue
+
+            # Nilai cukup besar → cek teknikal, jual kalau bearish
+            logger.info(f"[SWEEP] {pair}: Rp {value_idr:,.0f} (free {free:.8f}) — evaluasi teknikal...")
+            try:
+                candles = fetch_candles(pair, timeframe="5m", limit=50)
+                if not candles or len(candles) < 30:
+                    continue
+                analysis = score_coin(candles)
+                # Jual kalau sinyal bearish (score <= 40) atau falling knife
+                if analysis.get("action") == "SELL" or analysis.get("falling_knife", False):
+                    logger.info(f"[SWEEP-SELL] {pair}: score={analysis['score']} bearish, jual semua → IDR")
+                    result = place_order(pair, "sell", amount_base=free, price=price)
+                    if not result.get("error"):
+                        actual = result.get("price") or price
+                        amt = result.get("amount", free)
+                        pnl_pct = ((actual - price) / price * 100) if price > 0 else 0
+                        risk.record_trade(pair, "sell", amt, actual)
+                        notifier.notify_trade(
+                            "sell", pair, amt, actual, pnl_pct,
+                            "🧹 Wallet sweep (bearish)",
+                            dry_run=False,
+                        )
+                        logger.info(f"[SWEEP-SELL] ✅ {pair} → IDR Rp {actual * amt:,.0f}")
+                        sold_any = True
+                    else:
+                        logger.warning(f"[SWEEP-SELL] {pair} gagal: {result['error']}")
+                else:
+                    logger.debug(f"[SWEEP] {pair}: score={analysis['score']} {analysis['action']}, keep")
+            except Exception as e:
+                logger.debug(f"[SWEEP] Error evaluasi {pair}: {e}")
+
+        if sold_any:
+            # Refresh balance setelah jual
+            new_bal = check_idr_balance()
+            logger.info(f"[SWEEP] Saldo IDR setelah sweep: Rp {new_bal:,.0f}")
+
+        return sold_any
+
+    except Exception as e:
+        logger.warning(f"Sweep wallet error: {e}")
+        return False
 
 
 # ------------------------------------------------------------
@@ -557,7 +667,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         risk.save_state()
         return
 
-    # -- PHASE 1: Reconcile state vs exchange balance + Auto dust-sell ────
+    # -- PHASE 1: Reconcile state vs exchange balance ----------------------
     if not Config.DRY_RUN and not scan_only:
         try:
             balance        = get_balance()
@@ -570,35 +680,14 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
             risk.reconcile_with_balance(balance["holdings"], current_prices)
 
-            # ── Auto dust-sell: jual coin kecil ke IDR ──────────────
-            # Kalau ada coin di exchange yang nilainya < MIN_ORDER_IDR,
-            # coba jual via quoteOrderQty (fitur penukaran kecil Tokocrypto).
-            # Hanya kalau total nilai cukup untuk minimum (≥ 20k IDR).
-            for asset, amounts in balance["holdings"].items():
-                total_amount = amounts.get("total", 0)
-                if total_amount <= 0:
-                    continue
-                pair = f"{asset}/{Config.BASE_CURRENCY}"
-                price = current_prices.get(pair, 0)
-                if price <= 0:
-                    continue
-                value_idr = total_amount * price
-
-                # Kalau coin tidak di-track sebagai posisi DAN nilainya kecil
-                tracked = any(p["symbol"] == pair for p in risk.state.get("positions", []))
-                if not tracked and value_idr >= Config.MIN_ORDER_IDR:
-                    # Bisa dijual, coba dust-sell
-                    logger.info(f"[DUST-SELL] {pair}: {total_amount:.8f} = Rp {value_idr:,.0f}")
-                    result = place_order(pair, "sell", amount_base=total_amount, price=price)
-                    if not result.get("error"):
-                        actual_price = result.get("price") or price
-                        logger.info(f"Dust-sell {pair} OK: Rp {actual_price * result.get('amount', total_amount):,.0f}")
-                    # Tidak kirim Telegram (anti-spam)
-
         except Exception as e:
             logger.warning(f"Reconcile gagal (lanjut): {e}")
 
-    # -- PHASE 2: EXIT -- Cek posisi terbuka --------------------------------
+    # -- PHASE 2: SWEEP WALLET -- Kelola semua aset di dompet ----------------
+    if not scan_only:
+        sweep_wallet(risk)
+
+    # -- PHASE 3: EXIT -- Cek posisi terbuka --------------------------------
     sold = False
     if not scan_only:
         sold = check_and_sell_positions(risk)
@@ -609,7 +698,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         logger.info("Quick check selesai (skip scan & entry)")
         return
 
-    # -- PHASE 3: SCAN ------------------------------------------------------
+    # -- PHASE 4: SCAN ------------------------------------------------------
     rankings = scan_all_coins()
     if not rankings:
         logger.warning("Tidak ada coin yang bisa di-scan")
@@ -621,6 +710,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         risk.save_state()
         return
 
+    # -- PHASE 5: ENTRY -- Beli koin terbaik dari hasil scan --------------
     top  = rankings[0]
     buys = [c for c in rankings if c.get("action") == "BUY"]
     logger.info(
