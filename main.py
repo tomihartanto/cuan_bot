@@ -29,10 +29,12 @@ from bot.exchange import (
     get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
     check_idr_balance, check_market_active,
+    cancel_all_orders, get_open_orders, get_clock_drift_ms,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
 from bot import notifier
+from bot.websocket import start as ws_start, stop as ws_stop, get_latest_price, is_running as ws_running
 from bot.ai import filter_buy_signal
 from bot.market_intel import get_intel_bonus, get_market_summary, get_market_sentiment
 
@@ -234,7 +236,8 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
             f"Coba quoteOrderQty..."
         )
         try:
-            result = place_order(symbol, "sell", amount_base=amount, price=price)
+            result = place_order(symbol, "sell", amount_base=amount, price=price,
+                                skip_validation=True)
             if not result.get("error"):
                 actual = result.get("price") or price
                 logger.info(f"Dust-sell {symbol} OK: {result.get('amount', amount):.8f} @ Rp {actual:,.0f}")
@@ -309,12 +312,13 @@ def sweep_wallet(risk: RiskManager) -> bool:
                 traded_symbols.add(pair)
                 continue
 
-            # Nilai kecil → dust sell via quoteOrderQty
+            # Nilai kecil → dust sell via quoteOrderQty (skip min notional check)
             if value_idr < Config.MIN_ORDER_IDR:
                 logger.info(
                     f"[SWEEP-DUST] {pair}: {free:.8f} = Rp {value_idr:,.0f}. Coba dust-sell..."
                 )
-                result = place_order(pair, "sell", amount_base=free, price=price)
+                result = place_order(pair, "sell", amount_base=free, price=price,
+                                    skip_validation=True)
                 if not result.get("error"):
                     actual = result.get("price") or price
                     amt = result.get("amount", free)
@@ -632,14 +636,25 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
 
     except Exception as e:
         logger.error(f"Init gagal: {e}")
-        notifier.notify_error(
-            f"Init gagal (Cek API Key / IP Whitelist / Tokocrypto down):\n{e}",
-            context="run() init phase — get_balance/RiskManager",
-            force_send=True  # error kritis: bot tidak bisa mulai sama sekali
-        )
+        notifier.notify_error(f"Init gagal: {e}", context="startup", force_send=True)
         return
 
-    # Startup notif (skip di quick mode, anti-spam)
+    # ── Start WebSocket real-time ────────────────────────────────────
+    if not scan_only:
+        try:
+            ws_start()
+            logger.info(f"[WSS] WebSocket started (market + account). Fallback ke polling jika tidak ada data.")
+        except Exception as e:
+            logger.warning(f"[WSS] Gagal start WebSocket: {e}. Fallback ke polling.")
+
+    # ── Clock sync check ────────────────────────────────────────────
+    drift = get_clock_drift_ms()
+    if abs(drift) > 1000:
+        logger.warning(f"[CLOCK] Drift {drift}ms — bisa menyebabkan signature error")
+    else:
+        logger.debug(f"[CLOCK] Drift OK: {drift}ms")
+
+    # ── Startup notif (skip di quick mode, anti-spam) ──────────────
     if not quick_check and risk.should_send_startup_notif():
         valid_pairs = len(get_trade_pairs())
         notifier.notify_startup(num_pairs=valid_pairs, market_info=get_market_summary())

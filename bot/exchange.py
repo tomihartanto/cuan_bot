@@ -49,8 +49,8 @@ def _signed_get(endpoint: str, params: dict = None, retries: int = 2) -> dict:
             resp = requests.get(url, headers=headers, timeout=15)
             data = resp.json()
             if data.get("code") != 0:
-                logger.error(f"API error GET {endpoint}: {data.get('msg', resp.text[:200])}")
-                return {}
+                logger.warning(f"API error GET {endpoint}: {data.get('msg', resp.text[:200])}")
+                return {"__api_error__": True, "code": data.get("code"), "msg": data.get("msg", "")}
             return data.get("data", {})
         except Exception as e:
             logger.error(f"API request failed GET {endpoint} (attempt {attempt+1}/{retries}): {e}")
@@ -60,10 +60,16 @@ def _signed_get(endpoint: str, params: dict = None, retries: int = 2) -> dict:
 
 
 def _signed_post(endpoint: str, params: dict, retries: int = 2) -> dict:
-    params["timestamp"]  = int(_time.time() * 1000)
-    params["recvWindow"] = 5000
+    # ── Refresh timestamp tiap attempt (JANGAN mutasi dict caller) ────
+    current_time = int(_time.time() * 1000)
+    current_params = {
+        **params,
+        "timestamp": current_time,
+        "recvWindow": 5000,
+    }
 
-    body = "&".join(f"{k}={v}" for k, v in params.items())
+    # ── SORT params untuk signature (konsisten dengan _signed_get) ────
+    body = "&".join(f"{k}={v}" for k, v in sorted(current_params.items()))
     signature = _hmac_sha256(Config.SECRET_KEY, body)
 
     url = f"{BASE_URL}{endpoint}"
@@ -79,16 +85,18 @@ def _signed_post(endpoint: str, params: dict, retries: int = 2) -> dict:
             )
             data = resp.json()
             if data.get("code") != 0:
-                logger.error(
-                    f"API error POST {endpoint}: {data.get('msg') or data.get('message', resp.text[:200])}"
+                msg = data.get("msg") or data.get("message", resp.text[:200])
+                logger.warning(
+                    f"API error POST {endpoint}: {msg}"
                 )
-                return {}
+                # Return error info agar caller bisa handle (bukan kosong)
+                return {"__api_error__": True, "code": data.get("code"), "msg": msg}
             return data.get("data", {})
         except Exception as e:
             logger.error(f"API request failed POST {endpoint} (attempt {attempt+1}/{retries}): {e}")
             if attempt < retries - 1:
                 _time.sleep(1)
-    return {}
+    return {"__api_error__": True, "code": -1, "msg": "Connection failed after retries"}
 
 
 # ── Symbol Info ─────────────────────────────────────────────────────
@@ -165,37 +173,6 @@ def _market_url_and_symbol(symbol: str):
 
 # ── Public Market Data ──────────────────────────────────────────────
 
-_volume_cache = None
-_volume_cache_time = 0
-
-
-def get_24h_volume_map() -> dict:
-    """Return {pair_slash: quoteVolume_24h} untuk semua pair IDR. Cached 5 menit."""
-    global _volume_cache, _volume_cache_time
-    now = _time.time()
-    if _volume_cache is not None and (now - _volume_cache_time) < 300:
-        return _volume_cache
-
-    try:
-        resp = requests.get(f"{MBX_URL}/ticker/24hr", timeout=15)
-        data = resp.json()
-        if not isinstance(data, list):
-            return {}
-
-        volumes = {}
-        for item in data:
-            sym = item.get("symbol", "")
-            qv  = float(item.get("quoteVolume", 0) or 0)
-            volumes[sym] = qv
-
-        _volume_cache = volumes
-        _volume_cache_time = now
-        return volumes
-    except Exception as e:
-        logger.warning(f"24h ticker error: {e}")
-        return _volume_cache or {}
-
-
 def get_trade_pairs(min_volume: float = None) -> list:
     """
     Return list pasangan IDR aktif & likuid di Tokocrypto.
@@ -251,57 +228,70 @@ def get_trade_pairs(min_volume: float = None) -> list:
 
 
 # ── 24h Ticker Stats (untuk deteksi pump) ──────────────────────────
+# Digabung dengan volume map — SATU request untuk DUAKA data.
 
-_ticker_stats_cache = None
-_ticker_stats_time = 0
+_ticker_cache = None
+_ticker_cache_time = 0
+_TICKER_CACHE_TTL = 300  # 5 menit
 
 
-def _get_24h_ticker_stats() -> dict:
+def _load_24h_ticker(force: bool = False) -> dict:
     """
-    Ambil statistik 24h ticker (volume spike ratio + price change %).
-    Cached 5 menit. Dipakai untuk deteksi pump/hot listing.
+    SATU request ke /ticker/24hr → return {symbol: full_item_dict}.
+    Digunakan oleh get_24h_volume_map() dan get_24h_ticker_stats().
+    Cached 5 menit.
     """
-    global _ticker_stats_cache, _ticker_stats_time
+    global _ticker_cache, _ticker_cache_time
     now = _time.time()
-    if _ticker_stats_cache is not None and (now - _ticker_stats_time) < 300:
-        return _ticker_stats_cache
+    if _ticker_cache is not None and not force and (now - _ticker_cache_time) < _TICKER_CACHE_TTL:
+        return _ticker_cache
 
     try:
         resp = requests.get(f"{MBX_URL}/ticker/24hr", timeout=15)
         data = resp.json()
         if not isinstance(data, list):
-            return {}
+            return _ticker_cache or {}
 
-        stats = {}
+        ticker = {}
         for item in data:
             sym = item.get("symbol", "")
-            if not sym:
-                continue
-            qv = float(item.get("quoteVolume", 0) or 0)
-            vol = float(item.get("volume", 0) or 0)
-            price_change = float(item.get("priceChangePercent", 0) or 0)
-            high = float(item.get("highPrice", 0) or 0)
-            low = float(item.get("lowPrice", 0) or 0)
-            # Approx volume spike: kalau ada count trades, ratio = trades / avg
-            # Karena 24hr ticker tidak punya data per-candle, kita pakai
-            # price change absolut + quote volume sebagai proxy pump.
-            # (Volume spike ekstrem akan dideteksi juga di scanner via calc_volume_trend)
-            stats[sym] = {
-                "quote_volume": qv,
-                "volume": vol,
-                "price_change_pct": price_change,
-                "high": high,
-                "low": low,
-                # Proxy: price change besar = volatilitas tinggi = potensi hot
-                "volume_spike_ratio": max(1.0, abs(price_change) / 3.0),  # rough scaling
-            }
+            if sym:
+                ticker[sym] = item
 
-        _ticker_stats_cache = stats
-        _ticker_stats_time = now
-        return stats
+        _ticker_cache = ticker
+        _ticker_cache_time = now
+        return ticker
     except Exception as e:
-        logger.warning(f"24h ticker stats error: {e}")
-        return _ticker_stats_cache or {}
+        logger.warning(f"24h ticker error: {e}")
+        return _ticker_cache or {}
+
+
+def get_24h_volume_map() -> dict:
+    """Return {symbol: quoteVolume_24h} untuk semua pair IDR. Cached 5 menit."""
+    ticker = _load_24h_ticker()
+    return {sym: float(item.get("quoteVolume", 0) or 0) for sym, item in ticker.items()}
+
+
+def _get_24h_ticker_stats() -> dict:
+    """
+    Statistik 24h ticker (volume spike ratio + price change %).
+    Renamed dari proxy palsu → pakai quote volume sebagai rujukan.
+    """
+    ticker = _load_24h_ticker()
+    stats = {}
+    for sym, item in ticker.items():
+        price_change = float(item.get("priceChangePercent", 0) or 0)
+        stats[sym] = {
+            "quote_volume": float(item.get("quoteVolume", 0) or 0),
+            "volume": float(item.get("volume", 0) or 0),
+            "price_change_pct": price_change,
+            "high": float(item.get("highPrice", 0) or 0),
+            "low": float(item.get("lowPrice", 0) or 0),
+            # Rename: bukan "volume spike" tapi price volatility proxy
+            "price_volatility_ratio": max(1.0, abs(price_change) / 3.0),
+            "volume_spike_ratio": max(1.0, abs(price_change) / 3.0),  # backward compat
+        }
+    return stats
 
 
 def fetch_candles(symbol: str, timeframe: str = None, limit: int = None) -> list:
@@ -359,7 +349,6 @@ def fetch_ticker_price(symbol: str) -> float:
             resp = requests.get(
                 f"{BASE_URL}/open/v1/market/depth",
                 params={"symbol": sym_str, "limit": 5},
-                headers={"X-MBX-APIKEY": Config.API_KEY},
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -493,20 +482,23 @@ def validate_min_notional(side: str, amount_idr: float = None,
 
 
 def place_order(symbol: str, side: str, amount_idr: float = None,
-                amount_base: float = None, price: float = None) -> dict:
+                amount_base: float = None, price: float = None,
+                skip_validation: bool = False) -> dict:
     """
     Eksekusi market order via Tokocrypto API.
     BUY  -> quoteOrderQty (nominal IDR)
     SELL -> quantity (jumlah crypto), fallback ke quoteOrderQty kalau gagal min notional
 
-    Validasi nominal minimum (MIN_ORDER_IDR) diterapkan untuk kedua sisi.
+    Validasi nominal minimum (MIN_ORDER_IDR) diterapkan untuk kedua sisi,
+    KECUALI skip_validation=True (untuk dust sell).
     """
     # ── Server-side validation: nominal minimum ─────────────────────
-    ok, err = validate_min_notional(side, amount_idr=amount_idr,
-                                    amount_base=amount_base, price=price)
-    if not ok:
-        logger.warning(f"[VALIDATION] {side.upper()} {symbol} ditolak: {err}")
-        return {"error": err}
+    if not skip_validation:
+        ok, err = validate_min_notional(side, amount_idr=amount_idr,
+                                        amount_base=amount_base, price=price)
+        if not ok:
+            logger.warning(f"[VALIDATION] {side.upper()} {symbol} ditolak: {err}")
+            return {"error": err}
 
     if Config.DRY_RUN:
         qty = amount_base or (amount_idr / price if price and price > 0 else 0)
@@ -537,23 +529,34 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
         params["quantity"] = f"{amount_base:.{precision}f}"
 
     data = _signed_post("/open/v1/orders", params)
-    if not data:
+
+    # ── Handle API error (bukan response kosong) ────────────────────
+    if isinstance(data, dict) and data.get("__api_error__"):
+        error_msg = data.get("msg", "Unknown API error")
         # ── Fallback SELL via quoteOrderQty ──────────────────────────
-        # Jika quantity sell gagal (response kosong / min notional), coba
-        # jual berdasarkan nilai IDR (quoteOrderQty). Ini berguna saat
-        # precision/stepSize menyebabkan rejected, atau nilai sedikit
-        # di bawah minimum dengan quantity tapi masih cukup dengan quote.
         if side == "sell" and amount_base and price and price > 0:
             sell_value_idr = int(amount_base * price)
             if sell_value_idr >= Config.MIN_ORDER_IDR:
-                logger.info(f"SELL {symbol}: retry via quoteOrderQty=Rp {sell_value_idr:,}")
+                logger.info(f"SELL {symbol}: quantity gagal ({error_msg}), retry via quoteOrderQty=Rp {sell_value_idr:,}")
                 fallback_params = {
                     "symbol": sym_str, "side": 1, "type": 2,
                     "quoteOrderQty": str(sell_value_idr),
                 }
-                data = _signed_post("/open/v1/orders", fallback_params)
-        if not data:
-            return {"error": "Order gagal, response kosong (quantity & quoteOrderQty fallback)"}
+                fallback_data = _signed_post("/open/v1/orders", fallback_params)
+                if isinstance(fallback_data, dict) and not fallback_data.get("__api_error__") and fallback_data:
+                    data = fallback_data
+                    logger.info(f"SELL {symbol}: quoteOrderQty fallback berhasil")
+                else:
+                    fb_msg = fallback_data.get("msg", "unknown") if isinstance(fallback_data, dict) else "empty"
+                    return {"error": f"SELL gagal: {error_msg}. quoteOrderQty juga gagal: {fb_msg}"}
+            else:
+                return {"error": f"{error_msg} (nilai Rp {sell_value_idr:,} < min Rp {Config.MIN_ORDER_IDR:,})"}
+        else:
+            return {"error": error_msg}
+
+    # Response kosong (bukan error) — ERROR, bukan sukses
+    if not data:
+        return {"error": f"Order gagal, response kosong dari server"}
 
     filled_qty   = float(data.get("executedQty", 0) or 0)
     filled_price = float(data.get("executedPrice", 0) or price or 0)
@@ -573,3 +576,152 @@ def place_order(symbol: str, side: str, amount_idr: float = None,
         "price":     filled_price,
         "status":    "filled" if filled_qty > 0 else "new",
     }
+
+
+# ── Order Management ───────────────────────────────────────────────
+
+def cancel_order(symbol: str, order_id: str = None, client_order_id: str = None) -> dict:
+    """
+    Batalkan order aktif di Tokocrypto.
+    Parameter: symbol WAJIB, order_id atau client_order_id SALAH SATU.
+    Returns: {success, order_id, msg}
+    """
+    sym_str = _format_nextme(symbol)
+    params = {"symbol": sym_str}
+
+    if order_id:
+        params["orderId"] = int(order_id) if isinstance(order_id, str) and order_id.isdigit() else order_id
+    elif client_order_id:
+        params["origClientOrderId"] = client_order_id
+    else:
+        return {"success": False, "msg": "Order ID atau client order ID diperlukan"}
+
+    data = _signed_post("/open/v1/orders/cancel", params)
+
+    if isinstance(data, dict) and data.get("__api_error__"):
+        return {"success": False, "msg": data.get("msg", "Cancel gagal")}
+
+    if not data:
+        return {"success": False, "msg": "Response kosong saat cancel"}
+
+    cancelled_id = data.get("orderId", order_id)
+    logger.info(f"CANCEL ORDER OK: {symbol} | ID: {cancelled_id}")
+    return {"success": True, "order_id": str(cancelled_id), "symbol": symbol}
+
+
+def get_open_orders(symbol: str = None) -> list:
+    """
+    Ambil daftar order yang masih aktif/pending.
+    Jika symbol diberikan, filter hanya untuk symbol tersebut.
+    Returns: list of dicts [{id, symbol, side, price, qty, status}, ...]
+    """
+    params = {}
+    if symbol:
+        params["symbol"] = _format_nextme(symbol)
+
+    data = _signed_get("/open/v1/orders", params if params else None)
+
+    if isinstance(data, dict) and data.get("__api_error__"):
+        logger.warning(f"Gagal ambil open orders: {data.get('msg')}")
+        return []
+
+    if not data:
+        return []
+
+    # Bisa berupa list atau dict dengan key "list"
+    orders = data if isinstance(data, list) else data.get("list", data.get("orders", []))
+    if not isinstance(orders, list):
+        orders = [orders]
+
+    result = []
+    for o in orders:
+        sym = o.get("symbol", "")
+        # Normalize symbol format: BTC_IDR → BTC/IDR
+        sym_normalized = sym.replace("_", "/").replace("BTCIDR", "BTC/IDR")
+        result.append({
+            "id":           str(o.get("orderId", "")),
+            "symbol":       sym_normalized,
+            "side":         "buy" if o.get("side") == 0 else "sell",
+            "type":         o.get("type"),
+            "price":        float(o.get("price", 0) or 0),
+            "qty":          float(o.get("origQty", 0) or 0),
+            "filled_qty":   float(o.get("executedQty", 0) or 0),
+            "status":       o.get("status", "UNKNOWN"),
+            "time":         o.get("time"),
+            "client_order_id": o.get("clientOrderId", ""),
+        })
+
+    return result
+
+
+def get_order_detail(order_id: str) -> dict:
+    """
+    Ambil detail order berdasarkan order ID.
+    Returns: {id, symbol, side, price, qty, filled_qty, status, ...} atau {}
+    """
+    data = _signed_get("/open/v1/orders/detail", {"orderId": order_id})
+
+    if isinstance(data, dict) and data.get("__api_error__"):
+        return {}
+
+    if not data:
+        return {}
+
+    sym = data.get("symbol", "").replace("_", "/").replace("BTCIDR", "BTC/IDR")
+    return {
+        "id":           str(data.get("orderId", "")),
+        "symbol":       sym,
+        "side":         "buy" if data.get("side") == 0 else "sell",
+        "type":         data.get("type"),
+        "price":        float(data.get("price", 0) or 0),
+        "qty":          float(data.get("origQty", 0) or 0),
+        "filled_qty":   float(data.get("executedQty", 0) or 0),
+        "filled_price": float(data.get("avgPrice", 0) or 0),
+        "status":       data.get("status", "UNKNOWN"),
+        "time":         data.get("time"),
+    }
+
+
+def cancel_all_orders(symbol: str = None) -> int:
+    """
+    Batalkan SEMUA open orders. Jika symbol diberikan, hanya untuk symbol tersebut.
+    Returns: jumlah order yang berhasil dibatalkan.
+    """
+    orders = get_open_orders(symbol)
+    cancelled = 0
+
+    for o in orders:
+        result = cancel_order(o["symbol"], order_id=o["id"])
+        if result.get("success"):
+            cancelled += 1
+            _time.sleep(0.3)  # rate limit
+
+    if cancelled > 0:
+        logger.info(f"Cancelled {cancelled}/{len(orders)} open orders")
+    return cancelled
+
+
+# ── Server Time ─────────────────────────────────────────────────────
+
+def get_server_time() -> int:
+    """Ambil server time Tokocrypto (unix timestamp ms). Untuk clock sync."""
+    try:
+        resp = requests.get(f"{BASE_URL}/open/v1/common/time", timeout=10)
+        data = resp.json()
+        if data.get("code") == 0:
+            # Tokocrypto returns timestamp at root level (data=null)
+            ts = data.get("timestamp") or data.get("data", {}).get("serverTime", 0)
+            return int(ts)
+    except Exception:
+        pass
+    return 0
+
+
+def get_clock_drift_ms() -> int:
+    """Return selisih waktu lokal vs server (ms). Negatif = lokal tertinggal."""
+    server = get_server_time()
+    if server <= 0:
+        return 0
+    local = int(_time.time() * 1000)
+    return local - server
+
