@@ -435,8 +435,27 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
         )
         return False
 
-    # Dynamic position sizing: persentase dari saldo riil
-    trade_amt = Config.get_trade_amount(available)
+    # ── Manager Investment: tentukan modal beli ─────────────────────────
+    # AI menentukan confidence berdasarkan sinyal teknikal + market intel.
+    # Semakin tinggi skor, semakin besar modal yang dipakai.
+    # Tapi TIDAK PERNAH lebih dari saldo yang tersedia.
+    max_amt = Config.get_trade_amount(available)  # batas maks dari config
+
+    # Confidence-based sizing: skor 55-70 = 50% modal, 70-85 = 75%, 85+ = 100%
+    if score >= 85:
+        size_pct = 1.0    # full modal — sinyal sangat kuat
+    elif score >= 70:
+        size_pct = 0.75   # 3/4 modal — sinyal kuat
+    elif score >= 55:
+        size_pct = 0.5    # setengah modal — sinyal moderate
+    else:
+        size_pct = 0.3    # minimal — sinyal lemah tapi masih buy
+
+    trade_amt = max(Config.MIN_ORDER_IDR, min(max_amt * size_pct, available - 500))
+
+    # Pastikan tidak lebih dari saldo dan tidak kurang dari minimum
+    if trade_amt > available:
+        trade_amt = max(Config.MIN_ORDER_IDR, available - 500)
     if trade_amt < Config.MIN_ORDER_IDR:
         logger.info(
             f"[SKIP-BUY] {symbol}: modal Rp {trade_amt:,.0f} < min Rp {Config.MIN_ORDER_IDR:,.0f} "
@@ -470,19 +489,30 @@ def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = F
 
     risk.record_trade(symbol, "buy", filled_qty, filled_price, result.get("id"))
 
-    # ── TP Adaptif: naikkan TP kalau momentum kuat (profil Moderat) ──
+    # ── Manager Investment: TP/SL dinamis berdasarkan skor ─────────────
+    # Skor tinggi → TP lebih besar (ambil lebih banyak profit)
+    # Skor rendah → TP lebih ketat (ambil profit cepat)
     tp_pct = Config.TAKE_PROFIT_PERCENT
+    sl_pct = Config.STOP_LOSS_PERCENT
+
+    if score >= 85:
+        tp_pct = 3.0   # TP longgar — momentum kuat
+        sl_pct = 1.5    # SL lebih longgar — kasih ruang
+    elif score >= 70:
+        tp_pct = 2.0   # TP normal
+        sl_pct = 1.0    # SL normal
+    else:
+        tp_pct = 1.5   # TP ketat — sinyal lemah, ambil cepat
+        sl_pct = 0.8    # SL ketat — cut loss lebih cepat
+
+    # TP Adaptif: naikkan TP kalau EMA gap besar
     if Config.TP_ADAPTIVE_ENABLED:
         ema_gap = abs(coin.get("ema_gap_pct", 0))
         if ema_gap >= Config.TP_ADAPTIVE_EMA_GAP_TRIGGER:
-            # Scale: baseline → max_TP secara linear dengan EMA gap
-            # Mis. gap 1% → baseline + 0%, gap 3% → ~max_TP
             scale = min(1.0, (ema_gap - Config.TP_ADAPTIVE_EMA_GAP_TRIGGER) / 2.0)
-            tp_pct = Config.TAKE_PROFIT_PERCENT + (
-                Config.TP_ADAPTIVE_MAX_PERCENT - Config.TAKE_PROFIT_PERCENT
-            ) * scale
+            tp_pct += (Config.TP_ADAPTIVE_MAX_PERCENT - tp_pct) * scale
             logger.info(
-                f"TP adaptif aktif: {tp_pct:.2f}% (EMA gap {ema_gap:.2f}%, baseline {Config.TAKE_PROFIT_PERCENT}%)"
+                f"TP adaptif: {tp_pct:.2f}% (EMA gap {ema_gap:.2f}%)"
             )
 
     risk.open_position(symbol, filled_qty, filled_price, value_idr=trade_amt, take_profit_pct=tp_pct)

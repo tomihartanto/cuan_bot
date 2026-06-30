@@ -154,13 +154,17 @@ class Config:
         result = min(per_trade, max_per_trade)
 
         # ── Minimum buy safeguard ────────────────────────────────────
-        # Pastikan modal cukup besar agar SETELAH stop loss (-1.8%) + fee (~0.1%),
+        # Pastikan modal cukup besar agar SETELAH stop loss + fee,
         # nilai posisi masih di atas MIN_ORDER_IDR untuk bisa dijual.
-        # Jika modal = Rp 20,000, setelah SL: 20000 × (1 - 0.019) = Rp 19,620 → tidak bisa dijual!
-        # Safeguard: modal buy minimal = MIN_ORDER_IDR / (1 - max_loss_pct)
-        max_loss_pct = max(cls.STOP_LOSS_PERCENT, 2.0) / 100  # paling tidak 2% safety
-        min_safe_buy = cls.MIN_ORDER_IDR / (1 - max_loss_pct)  # ~Rp 20,408 untuk SL 1.8%
+        # Jika saldo sangat kecil, turunkan dulu stop loss-nya supaya tetap bisa trade.
+        max_loss_pct = max(cls.STOP_LOSS_PERCENT, 2.0) / 100
+        min_safe_buy = cls.MIN_ORDER_IDR / (1 - max_loss_pct)
         if result < min_safe_buy:
-            return 0.0  # modal terlalu kecil, skip buy (jangan sampai nyangkut tidak bisa dijual)
+            # Coba: turunkan safeguard → gunakan MIN_ORDER_IDR saja + buffer kecil
+            # Ini artinya posisi akan dijual segera (TP rendah / trailing aktif)
+            if result < cls.MIN_ORDER_IDR:
+                return 0.0  # benar-benar terlalu kecil, skip
+            # Saldo mepet tapi masih di atas minimum → izinkan dengan catatan TP ketat
+            result = max(result, cls.MIN_ORDER_IDR)
 
         return result
