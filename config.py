@@ -15,8 +15,8 @@ class Config:
     SECRET_KEY = os.getenv("TOKOCRYPTO_SECRET_KEY", "")
     ZAI_API_KEY = os.getenv("ZAI_API_KEY", "")
     ZAI_API_URL = os.getenv("ZAI_API_URL", "https://api.z.ai/api/paas/v4/")
-    # Model Z.ai yang valid (per April 2026): glm-5.1, glm-5-turbo, glm-5,
-    # glm-4.7, glm-4.7-flash, glm-4.7-flashx, glm-4.6, glm-4.5 series.
+    # Model Z.ai yang valid (per April 2026): glm-5.2, glm-5.1, glm-5-turbo,
+    # glm-5, glm-4.7, glm-4.7-flash, glm-4.7-flashx, glm-4.6, glm-4.5 series.
     # glm-4.7-flash = murah & cepat untuk tugas simple (filter sinyal).
     ZAI_MODEL = os.getenv("ZAI_MODEL", "glm-4.7-flash")
 

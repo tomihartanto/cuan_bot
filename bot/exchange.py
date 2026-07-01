@@ -35,10 +35,14 @@ def _hmac_sha256(secret: str, data: str) -> str:
 def _signed_get(endpoint: str, params: dict = None, retries: int = 2) -> dict:
     if params is None:
         params = {}
-    params["timestamp"]  = int(_time.time() * 1000)
-    params["recvWindow"] = 5000
+    # ── Jangan mutasi dict caller (sama seperti _signed_post) ──────────
+    current_params = {
+        **params,
+        "timestamp":  int(_time.time() * 1000),
+        "recvWindow": 5000,
+    }
 
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    query = "&".join(f"{k}={v}" for k, v in sorted(current_params.items()))
     signature = _hmac_sha256(Config.SECRET_KEY, query)
 
     url = f"{BASE_URL}{endpoint}?{query}&signature={signature}"

@@ -11,6 +11,7 @@ Klasifikasi notifikasi:
 """
 
 import hashlib
+import re
 import requests
 import logging
 import time as _time
@@ -45,7 +46,7 @@ def _is_rate_limited(category: str, dedup_key: str) -> bool:
     now = _time.time()
     key = f"{category}:{dedup_key}"
     last_sent = _notification_history[key]
-    # Buang history yang sudah过期 (> 2x cooldown)
+    # Buang history yang sudah kedaluwarsa (> 2x cooldown)
     cutoff = now - (cooldown * 2)
     _notification_history[key] = [t for t in last_sent if t > cutoff]
     if _notification_history[key]:
@@ -66,7 +67,6 @@ def _make_dedup_key(message: str) -> str:
     Buat key dedup dari pesan. Abaikan angka & simbol agar "Saldo IDR Rp 9,000"
     dan "Saldo IDR Rp 8,500" dianggap pesan yang sama (sama penyebabnya).
     """
-    import re
     # Hapus angka & format mata uang
     normalized = re.sub(r"[\d,.\-+/]+", "", message)
     return hashlib.md5(normalized.encode()).hexdigest()[:12]
@@ -183,6 +183,21 @@ def notify_daily_summary(status: dict):
     trade_amt    = f"Rp {status.get('current_trade_amount', 0):,.0f}"
     max_pos      = status.get("max_positions", "-")
 
+    # Dust tracking — coin yang perlu convert manual
+    dust_list = status.get("dust_tracking", [])
+    dust_section = ""
+    if dust_list:
+        dust_total = sum(d["value_idr"] for d in dust_list)
+        dust_lines = "\n".join(
+            f"   • {d['symbol']}: Rp {d['value_idr']:,.0f}" for d in dust_list
+        )
+        dust_section = (
+            f"\n━━━━━━━━━━━━━━━━\n"
+            f"🧹 <b>Dust ({len(dust_list)} coin — Rp {dust_total:,.0f})</b>\n"
+            f"{dust_lines}\n"
+            f"ℹ️ Convert manual via app Tokocrypto"
+        )
+
     msg = (
         f"📊 <b>RINGKASAN SESI</b>\n"
         f"━━━━━━━━━━━━━━━━\n"
@@ -197,6 +212,7 @@ def notify_daily_summary(status: dict):
         f"💵 Modal per trade: {trade_amt}\n"
         f"📈 Trailing Stop : {'ON' if Config.TRAILING_STOP_ENABLED else 'OFF'}"
         f"{stop_warn}"
+        f"{dust_section}"
     )
     send_telegram(msg)
 

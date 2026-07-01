@@ -38,6 +38,7 @@ class RiskManager:
             "recent_results":     [],    # History win/loss untuk win-rate guard
             "day_start_balance":  None,  # Snapshot saldo awal hari (untuk daily loss limit)
             "last_summary_time":  None,  # Throttle daily summary notification
+            "dust_tracking":      [],    # Coin stuck di bawah min notional (perlu convert manual)
         }
         try:
             if os.path.exists(self.state_file):
@@ -391,7 +392,23 @@ class RiskManager:
             "current_trade_amount": round(Config.get_trade_amount(available_balance), 2),
             "consecutive_losses":   self.state.get("consecutive_losses", 0),
             "day_start_balance":    self.state.get("day_start_balance"),
+            "dust_tracking":       self.state.get("dust_tracking", []),
         }
+
+    def add_dust(self, symbol: str, amount: float, value_idr: float):
+        """Catat coin yang gagal dijual karena di bawah min notional (perlu convert manual)."""
+        dust = self.state.setdefault("dust_tracking", [])
+        for d in dust:
+            if d["symbol"] == symbol:
+                d["amount"] = amount
+                d["value_idr"] = round(value_idr, 2)
+                return
+        dust.append({"symbol": symbol, "amount": amount, "value_idr": round(value_idr, 2)})
+
+    def clear_dust(self, symbol: str):
+        """Hapus coin dari dust tracking (sudah berhasil dijual atau di-convert)."""
+        dust = self.state.get("dust_tracking", [])
+        self.state["dust_tracking"] = [d for d in dust if d["symbol"] != symbol]
 
     def should_send_startup_notif(self) -> bool:
         """Hanya kirim startup notif kalau sudah > 1 jam dari notif terakhir."""

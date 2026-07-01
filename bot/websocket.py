@@ -21,14 +21,12 @@ import time as _time
 import threading
 import logging
 from config import Config
-from bot.exchange import _signed_post, _format_nextme, _get_symbol_type, _load_symbols
+from bot.exchange import _signed_post, _format_nextme, _load_symbols
 
 logger = logging.getLogger("cuanbot")
 
 # ── WSS URLs ────────────────────────────────────────────────────────
-WSS_MBX    = "wss://stream-bn.2meta.app/ws"
 WSS_NEXTME = "wss://stream-toko.2meta.app/ws"
-WSS_ACCOUNT = "wss://stream-toko.2meta.app/ws"
 
 # ── State ────────────────────────────────────────────────────────────
 _price_cache = {}      # {"BTC/IDR": {"price": 12345.0, "bid": 12340, "ask": 12350, "ts": 1234567890}}
@@ -207,7 +205,7 @@ def _start_ws_account():
 
     ws = websocket.WebSocket()
     try:
-        ws.connect(WSS_ACCOUNT, timeout=10)
+        ws.connect(WSS_NEXTME, timeout=10)
         # Subscribe dengan listen token
         ws.send(json.dumps({
             "method": "subscribe",

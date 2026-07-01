@@ -29,12 +29,12 @@ from bot.exchange import (
     get_trade_pairs, fetch_candles,
     get_balance, place_order, fetch_ticker_price,
     check_idr_balance, check_market_active,
-    cancel_all_orders, get_open_orders, get_clock_drift_ms,
+    get_clock_drift_ms,
 )
 from bot.scanner import score_coin, score_coin_multi_tf
 from bot.risk import RiskManager
 from bot import notifier
-from bot.websocket import start as ws_start, stop as ws_stop, get_latest_price, is_running as ws_running
+from bot.websocket import start as ws_start
 from bot.ai import filter_buy_signal
 from bot.market_intel import get_intel_bonus, get_market_summary, get_market_sentiment
 
@@ -243,11 +243,14 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
                 logger.info(f"Dust-sell {symbol} OK: {result.get('amount', amount):.8f} @ Rp {actual:,.0f}")
                 risk.close_position(symbol, actual)
                 risk.record_trade(symbol, "sell", result.get("amount", amount), actual)
+                risk.clear_dust(symbol)
                 return True
             else:
                 logger.debug(f"Dust-sell {symbol} gagal: {result['error']}")
+                risk.add_dust(symbol, amount, value_idr)
         except Exception as e:
             logger.debug(f"Dust-sell {symbol} error: {e}")
+            risk.add_dust(symbol, amount, value_idr)
         return False
 
     logger.info(f"SELL {symbol}: {amount:.6f} @ Rp {price:,.0f} | {reason}")
@@ -260,6 +263,7 @@ def _execute_sell(risk: RiskManager, action: dict) -> bool:
     actual_price = result.get("price") or price
     pnl_data     = risk.close_position(symbol, actual_price)
     risk.record_trade(symbol, "sell", amount, actual_price, result.get("id"))
+    risk.clear_dust(symbol)
 
     status = risk.get_status()
     notifier.notify_trade(
@@ -326,6 +330,7 @@ def sweep_wallet(risk: RiskManager) -> bool:
                     sold_any = True
                 else:
                     logger.debug(f"[SWEEP-DUST] {pair} gagal: {result['error']}")
+                    risk.add_dust(pair, free, value_idr)
                 continue
 
             # Nilai cukup besar → cek teknikal, jual kalau bearish
@@ -373,28 +378,6 @@ def sweep_wallet(risk: RiskManager) -> bool:
 # ------------------------------------------------------------
 # ENTRY -- Beli Coin Terbaik dari Scan
 # ------------------------------------------------------------
-
-def try_buy_best_coin(risk: RiskManager, rankings: list, available_balance: float) -> bool:
-    """Beli coin dengan sinyal terkuat dari hasil scan."""
-    can, reason = risk.can_trade(available_balance)
-    if not can:
-        logger.info(f"Tidak bisa beli: {reason}")
-        if "Emergency stop" in reason or "Daily loss limit" in reason or "Win rate rendah" in reason:
-            # Status bot normal (pause proteksi), bukan error sistem. Pakai INFO.
-            notifier.notify_info(f"Bot pause otomatis:\n{reason}")
-        return False
-
-    buy_candidates = [
-        c for c in rankings
-        if c.get("action") == "BUY" and not c.get("falling_knife", False)
-    ]
-
-    if not buy_candidates:
-        logger.info("Tidak ada sinyal BUY yang valid")
-        return False
-
-    return _execute_buy(risk, buy_candidates[0], buy_candidates[0]["reason"])
-
 
 def _execute_buy(risk: RiskManager, coin: dict, reason: str, bypass_ai: bool = False) -> bool:
     """Eksekusi satu buy order."""
@@ -769,7 +752,7 @@ def run(dry_run_override=None, scan_only=False, force_buy_symbol=None, force_sel
         logger.info("Scan-only selesai.")
         return
 
-    # -- PHASE 4: ENTRY -- Beli beberapa kandidat hingga posisi terisi -----
+    # -- PHASE 5: ENTRY -- Beli beberapa kandidat hingga posisi terisi -----
     # Diversifikasi: isi slot yang kosong dengan top kandidat BUY (bukan hanya top 1)
     bought = False
     current_positions = len(risk.state.get("positions", []))
